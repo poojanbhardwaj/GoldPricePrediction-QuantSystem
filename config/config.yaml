@@ -1,0 +1,206 @@
+# ============================================================
+# Gold Price Prediction - Master Configuration
+# ============================================================
+
+project:
+  name: "AI-Based Gold Price Prediction"
+  version: "1.0.0"
+  author: "B.Tech Final Year Project"
+  description: "ML & DL based gold price forecasting system"
+
+# ── Paths ────────────────────────────────────────────────────
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  data_external: "data/external"
+  models_saved: "models/saved"
+  models_checkpoints: "models/checkpoints"
+  models_versions: "models/versions"
+  logs: "logs"
+  reports: "report"
+
+# ── Data Sources ─────────────────────────────────────────────
+data:
+  start_date: "2010-01-01"
+  end_date: null                # null = today's date (always pulls latest data). Set an explicit
+                                 # date here only for reproducible backtests on a fixed window.
+  target_column: "Gold_Close"
+  date_column: "Date"
+  
+  tickers:
+    gold: "GC=F"          # Gold Futures
+    silver: "SI=F"         # Silver Futures
+    crude_oil: "CL=F"      # Crude Oil Futures
+    bitcoin: "BTC-USD"     # Bitcoin
+    dxy: "DX-Y.NYB"        # US Dollar Index
+    sp500: "^GSPC"         # S&P 500
+    vix: "^VIX"            # CBOE VIX
+    treasury_10y: "^TNX"  # 10-Year Treasury Yield
+    gold_etf: "GLD"        # SPDR Gold ETF
+
+  fred_series:
+    fed_rate: "FEDFUNDS"   # Federal Funds Rate
+    cpi: "CPIAUCSL"        # Consumer Price Index
+
+# ── Preprocessing ────────────────────────────────────────────
+preprocessing:
+  missing_value_strategy: "forward_fill"  # forward_fill | interpolate | drop
+  outlier_method: "iqr"                   # iqr | zscore | isolation_forest
+  outlier_threshold: 3.0
+  scaling_method: "minmax"                # minmax | standard | robust
+  predict_returns: true                   # true: predict next-day log-return (recommended,
+                                           # avoids tree-model extrapolation failure on trending
+                                           # prices). false: predict raw price level directly.
+  test_size: 0.2
+  validation_size: 0.1
+  n_splits: 5                             # TimeSeriesSplit
+  random_state: 42
+
+# ── Technical Indicators ─────────────────────────────────────
+indicators:
+  sma_periods: [5, 10, 20, 50, 100, 200]
+  ema_periods: [5, 10, 20, 50, 100]
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2
+  atr_period: 14
+  adx_period: 14
+  cci_period: 20
+  stoch_period: 14
+  williams_period: 14
+  mfi_period: 14
+  roc_period: 10
+  momentum_period: 10
+
+# ── Feature Engineering ──────────────────────────────────────
+features:
+  lag_periods: [1, 3, 5, 7, 15, 30]
+  rolling_windows: [5, 10, 20, 30, 60]
+  include_time_features: true
+  include_ratios: true
+  include_volatility: true
+  include_seasonality: true
+
+# ── ML Models ────────────────────────────────────────────────
+ml_models:
+  linear_regression:
+    fit_intercept: true
+    
+  decision_tree:
+    max_depth: 10
+    min_samples_split: 10
+    random_state: 42
+
+  random_forest:
+    n_estimators: 200
+    max_depth: 15
+    min_samples_split: 5
+    n_jobs: -1
+    random_state: 42
+
+  xgboost:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+    early_stopping_rounds: 50
+
+  lightgbm:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    num_leaves: 31
+    subsample: 0.8
+    random_state: 42
+    early_stopping_rounds: 50
+
+  catboost:
+    iterations: 500
+    depth: 6
+    learning_rate: 0.05
+    random_seed: 42
+    early_stopping_rounds: 50
+    verbose: 0
+
+  svr:
+    kernel: "rbf"
+    C: 100
+    epsilon: 0.1
+    gamma: "scale"
+
+# ── Deep Learning Models ──────────────────────────────────────
+dl_models:
+  sequence_length: 60          # lookback window (days)
+  forecast_horizon: 1          # predict N days ahead
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  dropout_rate: 0.2
+  patience: 15                 # early stopping patience
+  
+  lstm:
+    units: [128, 64]
+    return_sequences: true
+    
+  bilstm:
+    units: [128, 64]
+    
+  gru:
+    units: [128, 64]
+    
+  cnn_lstm:
+    cnn_filters: 64
+    cnn_kernel_size: 3
+    lstm_units: 64
+    pool_size: 2
+    
+  transformer:
+    num_heads: 4
+    key_dim: 32
+    ff_dim: 128
+    num_transformer_blocks: 2
+    mlp_units: [128, 64]
+
+# ── Evaluation Metrics ────────────────────────────────────────
+evaluation:
+  metrics: ["MAE", "RMSE", "MAPE", "R2", "DirectionalAccuracy"]
+  primary_metric: "RMSE"
+
+# ── Forecasting ───────────────────────────────────────────────
+forecasting:
+  forecast_days: 30
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level: "INFO"              # DEBUG | INFO | WARNING | ERROR
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+  log_to_file: true
+  log_file: "logs/gold_prediction.log"
+  max_bytes: 10485760        # 10 MB
+  backup_count: 5
+
+# ── Optuna Hyperparameter Tuning ─────────────────────────────
+optuna:
+  n_trials: 50
+  timeout: 600               # seconds
+  direction: "minimize"      # minimize RMSE
+
+# ── Streamlit Dashboard ───────────────────────────────────────
+dashboard:
+  title: "🥇 Gold Price Prediction AI"
+  theme: "dark"
+  page_icon: "🥇"
+  layout: "wide"
+  sidebar_state: "expanded"
+
+# ── API Keys (override with .env) ─────────────────────────────
+api:
+  fred_api_key: ""           # Get from https://fred.stlouisfed.org/docs/api/api_key.html
+  news_api_key: ""           # Get from https://newsapi.org
+  email_sender: ""
+  email_password: ""

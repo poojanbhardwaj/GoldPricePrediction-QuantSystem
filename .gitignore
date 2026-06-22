@@ -1,0 +1,76 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets
+.env
+*.env
+.streamlit/secrets.toml
+
+# Data / generated datasets
+data/raw/
+data/processed/
+data/interim/
+data/external/
+
+# Model artifacts / training outputs
+models/
+catboost_info/
+artifacts/
+outputs/
+exports/
+report/
+reports/
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.keras
+*.pt
+*.pth
+*.onnx
+
+# Backups / old app copies / patch folders
+backups/
+app_before_*.py
+*_before_*.py
+*_backup*
+_quant_upgrade_temp/
+_real_patch_temp/
+_phase*/
+_nextday_target_fix/
+*_patch_work/
+*_temp/
+
+# Zip files
+*.zip
+
+# Logs
+*.log
+logs/
+
+# Streamlit/export CSVs
+*export*.csv
+meta_reliability_grading.csv
+relatiblegrading.csv
+gradecounts.csv
+topabc.csv
+devensivewatch.csv
+avoidlist.csv
+nextactions.csv
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

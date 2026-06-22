@@ -1,0 +1,27 @@
+1. Unzip this file.
+
+2. Copy the src files into your existing project:
+
+   GoldPricePrediction/src/
+
+3. Copy streamlit_integration into your project root:
+
+   GoldPricePrediction/streamlit_integration/
+
+4. Run:
+
+   python -m src.prediction_ranges
+   python -m src.signals
+   python -m src.backtesting
+
+5. Optional full test:
+
+   python tests/test_phase1_modules.py
+
+6. Open streamlit_integration/predict_patch.txt and apply the patch to src/predict.py.
+
+7. Open streamlit_integration/app_router_patch.txt and apply the patch to app.py.
+
+8. Run:
+
+   streamlit run app.py
