@@ -1,4 +1,4 @@
-# 🥇 AI-Based Gold Price Prediction Using Machine Learning & Deep Learning
+#  AI-Based Gold Price Prediction Using Machine Learning & Deep Learning
 
 <div align="center">
 
@@ -17,7 +17,7 @@
 
 ---
 
-## 📌 Abstract
+##  Abstract
 
 Gold is one of the most actively traded commodities in the world, serving as a hedge against inflation and currency risk. Accurate gold price prediction has significant implications for investors, financial institutions, and policymakers. This project develops a comprehensive end-to-end AI pipeline that:
 
@@ -29,7 +29,7 @@ Gold is one of the most actively traded commodities in the world, serving as a h
 
 ---
 
-## ✨ Features
+##  Features
 
 | Category | Details |
 |---|---|
@@ -48,7 +48,7 @@ Gold is one of the most actively traded commodities in the world, serving as a h
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
 ```
 Raw Data (yfinance + FRED)
@@ -101,7 +101,7 @@ Raw Data (yfinance + FRED)
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 GoldPricePrediction/
@@ -158,7 +158,7 @@ GoldPricePrediction/
 
 ---
 
-## ⚙️ Installation
+##  Installation
 
 ### Prerequisites
 - Python 3.10+
@@ -201,7 +201,7 @@ python -c "from src.config_loader import ConfigLoader; print(ConfigLoader())"
 
 ---
 
-## 🚀 Usage
+##  Usage
 
 ### Option A: Run Complete Pipeline
 ```bash
@@ -231,7 +231,7 @@ Open browser at `http://localhost:8501`
 
 ---
 
-## 📊 Model Performance (Sample Results)
+##  Model Performance (Sample Results)
 
 | Rank | Model | MAE | RMSE | MAPE | R² | Dir. Acc |
 |------|-------|-----|------|------|----|----------|
@@ -247,7 +247,7 @@ Open browser at `http://localhost:8501`
 
 ---
 
-## 🐳 Deployment
+##  Deployment
 
 ### Docker
 ```bash
@@ -268,7 +268,7 @@ docker run -p 8501:8501 --env-file .env gold-prediction
 
 ---
 
-## 📚 Documentation
+##  Documentation
 
 | Document | Location |
 |---|---|
@@ -280,7 +280,7 @@ docker run -p 8501:8501 --env-file .env gold-prediction
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 **Data:** pandas, numpy, yfinance, fredapi, pandas-datareader  
 **ML:** scikit-learn, xgboost, lightgbm, catboost  
@@ -294,21 +294,24 @@ docker run -p 8501:8501 --env-file .env gold-prediction
 
 ---
 
-## 👨‍💻 Author
+##  Author
 
-**B.Tech Final Year Project**  
-Department of Computer Science & Engineering / AI & ML  
-Academic Year: 2024–25
+
+
+**Poojan Bhardwaj**  
+B.Tech in Mathematics and Computing  
+National Institute of Technology, Kurukshetra  
+Academic Year: 2024–2028
 
 ---
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-## 🙏 Acknowledgements
+##  Acknowledgements
 
 - [Yahoo Finance (yfinance)](https://github.com/ranaroussi/yfinance)
 - [Federal Reserve Economic Data (FRED)](https://fred.stlouisfed.org)
