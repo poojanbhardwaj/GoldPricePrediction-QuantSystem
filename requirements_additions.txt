@@ -1,7 +1,0 @@
-# These are likely already installed in your project.
-# Add only if missing.
-
-numpy
-pandas
-streamlit
-scikit-learn
