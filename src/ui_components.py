@@ -131,7 +131,10 @@ def render_section_header(title: str, subtitle: str = "") -> None:
 
 
 def render_research_disclaimer() -> None:
-    st.info("Research-only decision support. Outputs are evidence diagnostics, not execution instructions or financial advice.")
+    st.info(
+        "This is a research assistant, not financial advice. "
+        "It does not execute trades or approve real-money decisions."
+    )
 
 
 def render_blocked_capital_banner() -> None:
