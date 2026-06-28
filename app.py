@@ -41,6 +41,20 @@ from src.app_context import (
 )
 from src.explanation_glossary import glossary_entries
 from src.workflow_guide import run_multiasset_workflow_audit
+from src.research_orchestrator import (
+    PHASE26_PRODUCT_EXPERIENCE,
+    PRIMARY_USER_PAGES,
+    build_navigation_audit,
+    collect_asset_horizon_evidence,
+    load_latest_research_snapshot,
+    run_research_engine,
+    save_product_experience_artifacts,
+)
+from src.user_plan_generator import (
+    generate_all_asset_plans,
+    generate_portfolio_plan,
+    rank_asset_plans,
+)
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
     train_directional_models,
@@ -172,6 +186,14 @@ def _target_prefix(target_col: str) -> str:
     return str(target_col).replace("_Close", "")
 
 
+def _safe_filename_part(value: str) -> str:
+    """Normalize asset/model labels for downloadable file names."""
+    safe = str(value).strip().lower().replace("&", "and")
+    for ch in [" ", "/", "\\", ":", "*", "?", "\"", "<", ">", "|"]:
+        safe = safe.replace(ch, "_")
+    return "_".join(part for part in safe.split("_") if part) or "asset"
+
+
 def _table_research_explanation(title: str) -> str:
     name = str(title).lower()
     if "baseline" in name:
@@ -187,6 +209,70 @@ def _table_research_explanation(title: str) -> str:
     if "cost" in name:
         return "This table shows whether modeled execution costs erase the paper-research edge."
     return "Read this table as research evidence for the selected asset/horizon, not as an execution instruction."
+
+
+@st.cache_data(show_spinner=False)
+def _load_cached_market_history() -> pd.DataFrame:
+    """Load the local master dataset only; never trigger a download from a primary page."""
+    path = Path(__file__).resolve().parent / "data" / "processed" / "master_dataset.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, index_col="Date", parse_dates=True).sort_index()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _load_phase26_table(artifact_name: str) -> pd.DataFrame:
+    try:
+        table = load_latest_artifact(PHASE26_PRODUCT_EXPERIENCE, artifact_name, required=False)
+    except Exception:
+        table = None
+    return table if isinstance(table, pd.DataFrame) else pd.DataFrame()
+
+
+def _status_card_style(status: str) -> str:
+    return {
+        "Track": "positive",
+        "Watch": "info",
+        "Wait": "neutral",
+        "Avoid": "critical",
+        "High Risk": "critical",
+        "Data Issue": "warning",
+        "Not Enough Evidence": "warning",
+    }.get(str(status), "neutral")
+
+
+def _render_asset_plan_cards(plans: pd.DataFrame, *, show_advanced: bool = False) -> None:
+    if not isinstance(plans, pd.DataFrame) or plans.empty:
+        st.warning("No asset plans are available. Generate a research plan first.")
+        return
+    for _, plan in plans.iterrows():
+        with st.container(border=True):
+            left, right = st.columns([0.72, 0.28])
+            with left:
+                st.markdown(f"### {plan.get('Asset', '')} · {int(plan.get('Horizon', 0))}D")
+                st.caption(str(plan.get("Summary", "")))
+            with right:
+                render_status_card(
+                    "Status",
+                    plan.get("Status", "Not Enough Evidence"),
+                    f"Confidence: {plan.get('Confidence', 'Low')}",
+                    _status_card_style(str(plan.get("Status", ""))),
+                )
+            detail_a, detail_b = st.columns(2)
+            with detail_a:
+                st.markdown(f"**Why:** {plan.get('Why', '')}")
+                st.markdown(f"**Main risk:** {plan.get('MainRisk', '')}")
+                st.markdown(f"**What to watch:** {plan.get('WhatToWatch', '')}")
+            with detail_b:
+                st.markdown(f"**Tracking condition:** {plan.get('TrackingCondition', '')}")
+                st.markdown(f"**Invalidation condition:** {plan.get('InvalidationCondition', '')}")
+                st.markdown(f"**Recheck:** {plan.get('RecheckWhen', '')}")
+            if show_advanced:
+                with st.expander("Advanced evidence", expanded=False):
+                    st.write(plan.get("TechnicalEvidenceSummary", "No technical summary is available."))
+                    st.caption(f"Sources: {plan.get('AdvancedEvidenceReferences', 'No saved references')}")
 
 
 @st.cache_data(show_spinner=False)
@@ -303,6 +389,12 @@ if "selected_horizon" not in st.session_state:
     st.session_state.selected_horizon = DEFAULT_HORIZON
 if "phase23_multiasset_workflow_report" not in st.session_state:
     st.session_state.phase23_multiasset_workflow_report = None
+if "phase26_research_snapshot" not in st.session_state:
+    st.session_state.phase26_research_snapshot = None
+if "phase26_asset_plans" not in st.session_state:
+    st.session_state.phase26_asset_plans = None
+if "phase26_portfolio_plan" not in st.session_state:
+    st.session_state.phase26_portfolio_plan = None
 if "directional_results" not in st.session_state:
     st.session_state.directional_results = None
 if "directional_asset" not in st.session_state:
@@ -449,8 +541,8 @@ if "phase5_features_preview" not in st.session_state:
 # Sidebar Navigation
 # ════════════════════════════════════════════════════════════════
 
-st.sidebar.markdown("## Market Research Intelligence")
-st.sidebar.caption("Multi-asset evidence, validation, and risk workspace")
+st.sidebar.markdown("## Market Research Assistant")
+st.sidebar.caption("Simple plans first. Technical evidence remains available when needed.")
 st.sidebar.markdown("---")
 
 NAVIGATION_GROUPS = {
@@ -491,9 +583,18 @@ NAVIGATION_GROUPS = {
     ],
 }
 
-navigation_group = st.sidebar.radio("Workspace", list(NAVIGATION_GROUPS), key="navigation_group")
-group_pages = NAVIGATION_GROUPS[navigation_group]
-page_label = group_pages[0] if len(group_pages) == 1 else st.sidebar.radio("Page", group_pages, key=f"page_{navigation_group}")
+experience_page = st.sidebar.radio(
+    "Navigate",
+    list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"],
+    key="primary_product_navigation",
+)
+is_advanced_diagnostic = experience_page == "Advanced Diagnostics"
+if is_advanced_diagnostic:
+    navigation_group = st.sidebar.selectbox("Diagnostic area", list(NAVIGATION_GROUPS), key="navigation_group")
+    group_pages = NAVIGATION_GROUPS[navigation_group]
+    page_label = group_pages[0] if len(group_pages) == 1 else st.sidebar.selectbox("Diagnostic page", group_pages, key=f"page_{navigation_group}")
+else:
+    page_label = experience_page
 
 asset_names = get_supported_assets()
 PAGE_ROUTE_ALIASES = {
@@ -527,14 +628,261 @@ if _asset_mismatch(selected_asset):
     )
 
 st.sidebar.markdown("---")
-st.sidebar.caption("ResearchOnly | RealCapitalBlocked")
+st.sidebar.caption("Research assistant | Real-money decisions disabled")
+
+if is_advanced_diagnostic:
+    st.info("Advanced diagnostic page. Normal users should use Market Research Assistant or Asset Plans first.")
 
 
 # ════════════════════════════════════════════════════════════════
 # PAGE: HOME
 # ════════════════════════════════════════════════════════════════
 
-if page == "Overview Command Center":
+if page == "Market Research Assistant":
+    st.markdown('<p class="main-header">Market Research Assistant</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Select assets and horizons. The app checks available research evidence and creates a simple plan.</p>', unsafe_allow_html=True)
+    render_research_disclaimer()
+
+    assistant_a, assistant_b, assistant_c = st.columns(3)
+    with assistant_a:
+        assistant_asset = st.selectbox("Asset", ["All assets"] + get_supported_assets(), index=0, key="phase26_assistant_asset")
+    with assistant_b:
+        assistant_horizon = st.selectbox(
+            "Horizon",
+            ["All horizons"] + [f"{value}D" for value in get_available_horizons()],
+            index=0,
+            key="phase26_assistant_horizon",
+        )
+    with assistant_c:
+        show_advanced_evidence = st.checkbox("Show advanced evidence", value=False, key="phase26_show_advanced_evidence")
+
+    action_a, action_b = st.columns(2)
+    with action_a:
+        generate_plan_clicked = st.button("Generate Research Plan", type="primary", width="stretch")
+    with action_b:
+        refresh_snapshot_clicked = st.button("Refresh Research Snapshot", width="stretch")
+
+    if generate_plan_clicked or refresh_snapshot_clicked:
+        with st.spinner("Reviewing saved research evidence..."):
+            phase26_snapshot = run_research_engine(
+                selected_assets=get_supported_assets(),
+                selected_horizons=get_available_horizons(),
+                refresh=bool(refresh_snapshot_clicked),
+            )
+            phase26_plans = generate_all_asset_plans(phase26_snapshot)
+            phase26_portfolio = generate_portfolio_plan(phase26_plans)
+            save_product_experience_artifacts(phase26_snapshot, phase26_plans, phase26_portfolio)
+            st.session_state.phase26_research_snapshot = phase26_snapshot
+            st.session_state.phase26_asset_plans = phase26_plans
+            st.session_state.phase26_portfolio_plan = phase26_portfolio
+
+    phase26_snapshot = st.session_state.get("phase26_research_snapshot")
+    if not isinstance(phase26_snapshot, pd.DataFrame):
+        phase26_snapshot = load_latest_research_snapshot()
+    phase26_plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(phase26_plans, pd.DataFrame):
+        phase26_plans = _load_phase26_table("phase26_asset_plans")
+
+    if phase26_plans.empty:
+        st.warning("No research plan has been generated yet. Use Generate Research Plan to review available saved evidence.")
+    else:
+        display_plans = phase26_plans.copy()
+        if assistant_asset != "All assets":
+            display_plans = display_plans[display_plans["Asset"].astype(str).eq(assistant_asset)]
+        if assistant_horizon != "All horizons":
+            chosen_horizon = int(str(assistant_horizon).replace("D", ""))
+            display_plans = display_plans[pd.to_numeric(display_plans["Horizon"], errors="coerce").eq(chosen_horizon)]
+        display_plans = rank_asset_plans(display_plans)
+
+        counts = display_plans["Status"].value_counts()
+        track_rows = display_plans[display_plans["Status"].eq("Track")]
+        best_track = f"{track_rows.iloc[0]['Asset']} {int(track_rows.iloc[0]['Horizon'])}D" if not track_rows.empty else "None"
+        render_section_header("Portfolio View", "Simple statuses summarize the selected research context.")
+        render_metric_grid(
+            [
+                {"title": "Best to Track", "value": best_track, "subtitle": f"{int(counts.get('Track', 0))} track plan(s)", "status": "positive" if not track_rows.empty else "neutral"},
+                {"title": "Watchlist", "value": int(counts.get("Watch", 0)), "subtitle": "Interesting, but evidence remains limited", "status": "info"},
+                {"title": "Wait", "value": int(counts.get("Wait", 0) + counts.get("Not Enough Evidence", 0)), "subtitle": "No clear reason to prioritize now", "status": "neutral"},
+                {"title": "Avoid / High Risk", "value": int(counts.get("Avoid", 0) + counts.get("High Risk", 0)), "subtitle": "Risk or weak evidence dominates", "status": "critical" if counts.get("Avoid", 0) + counts.get("High Risk", 0) else "neutral"},
+                {"title": "Data Issues", "value": int(counts.get("Data Issue", 0)), "subtitle": "Repair data before interpretation", "status": "warning" if counts.get("Data Issue", 0) else "neutral"},
+            ]
+        )
+        render_section_header("Asset Plans", "Each plan explains why the status was assigned and what would change it.")
+        _render_asset_plan_cards(display_plans, show_advanced=show_advanced_evidence)
+        if show_advanced_evidence:
+            with st.expander("Raw evidence snapshot", expanded=False):
+                if phase26_snapshot.empty:
+                    st.info("No normalized evidence rows are available.")
+                else:
+                    st.dataframe(phase26_snapshot.head(1000), width="stretch", hide_index=True)
+
+
+elif page == "Asset Plans":
+    st.markdown('<p class="main-header">Asset Plans</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">The strongest current research plan for each configured asset</p>', unsafe_allow_html=True)
+    render_research_disclaimer()
+    asset_plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(asset_plans, pd.DataFrame):
+        asset_plans = _load_phase26_table("phase26_asset_plans")
+    portfolio_plan = st.session_state.get("phase26_portfolio_plan")
+    if not isinstance(portfolio_plan, pd.DataFrame):
+        portfolio_plan = _load_phase26_table("phase26_portfolio_plan")
+    if asset_plans.empty:
+        st.warning("No asset plans are available. Open Market Research Assistant and generate a plan first.")
+    else:
+        asset_focus = st.selectbox("Asset focus", ["All assets"] + get_supported_assets(), key="phase26_asset_plan_focus")
+        ranked_plans = rank_asset_plans(asset_plans)
+        best_by_asset = ranked_plans.sort_values("PlanRank").groupby("Asset", as_index=False).head(1)
+        if asset_focus != "All assets":
+            best_by_asset = best_by_asset[best_by_asset["Asset"].astype(str).eq(asset_focus)]
+        _render_asset_plan_cards(best_by_asset, show_advanced=True)
+        render_section_header("Downloads", "Export the current simple plans and portfolio summary.")
+        render_download_buttons(
+            {
+                "Asset plans": (asset_plans, "asset_plans.csv"),
+                "Portfolio plan": (portfolio_plan, "portfolio_plan.csv"),
+            }
+        )
+
+
+elif page == "Forecast Explorer":
+    st.markdown('<p class="main-header">Forecast Explorer</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Asset-routed history and saved forecast evidence, presented as research estimates</p>', unsafe_allow_html=True)
+    render_research_disclaimer()
+    forecast_a, forecast_b, forecast_c = st.columns(3)
+    with forecast_a:
+        explorer_asset = st.selectbox("Asset", get_supported_assets(), index=get_supported_assets().index(selected_asset), key="phase26_forecast_asset")
+    with forecast_b:
+        explorer_horizon = st.selectbox(
+            "Horizon",
+            get_available_horizons(),
+            index=get_available_horizons().index(int(selected_horizon)),
+            format_func=lambda value: f"{int(value)}D",
+            key="phase26_forecast_horizon",
+        )
+    with forecast_c:
+        history_window = st.selectbox("History window", ["90 days", "180 days", "1 year", "3 years", "Full history"], index=1, key="phase26_history_window")
+    validate_asset_horizon(explorer_asset, explorer_horizon)
+    explorer_target = get_asset_target(explorer_asset)
+    market_history = _load_cached_market_history()
+    history_rows = {"90 days": 90, "180 days": 180, "1 year": 252, "3 years": 756, "Full history": None}[history_window]
+    if market_history.empty or explorer_target not in market_history.columns:
+        st.warning(f"No cached price history is available for {explorer_asset}. Refresh data from Advanced Diagnostics before using this view.")
+    else:
+        selected_history = market_history[[explorer_target]].dropna()
+        if history_rows is not None:
+            selected_history = selected_history.tail(history_rows)
+        st.markdown(f"### {explorer_asset} Price History")
+        st.line_chart(selected_history, width="stretch")
+
+    explorer_snapshot = st.session_state.get("phase26_research_snapshot")
+    if not isinstance(explorer_snapshot, pd.DataFrame):
+        explorer_snapshot = load_latest_research_snapshot()
+    explorer_evidence = collect_asset_horizon_evidence(explorer_asset, int(explorer_horizon), explorer_snapshot)
+    explorer_plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(explorer_plans, pd.DataFrame):
+        explorer_plans = _load_phase26_table("phase26_asset_plans")
+    current_plan = explorer_plans[
+        explorer_plans.get("Asset", pd.Series(dtype=str)).astype(str).eq(explorer_asset)
+        & pd.to_numeric(explorer_plans.get("Horizon", pd.Series(dtype=float)), errors="coerce").eq(int(explorer_horizon))
+    ] if not explorer_plans.empty else pd.DataFrame()
+    if not current_plan.empty:
+        row = current_plan.iloc[0]
+        render_status_card("Current research status", row.get("Status", "Not Enough Evidence"), row.get("Summary", ""), _status_card_style(str(row.get("Status", ""))))
+
+    forecast_mask = explorer_evidence.get("Metric", pd.Series(dtype=str)).astype(str).str.contains("forecast|predicted|probability", case=False, regex=True, na=False)
+    forecast_table = explorer_evidence.loc[forecast_mask, ["Asset", "Horizon", "Metric", "Value", "Status", "Freshness"]].copy()
+    render_safe_table(
+        forecast_table,
+        f"{explorer_asset} {int(explorer_horizon)}D Forecast Evidence",
+        "No saved forecast evidence is available for this asset and horizon. This is not treated as a neutral forecast.",
+    )
+    if not forecast_table.empty:
+        st.download_button(
+            "Download forecast evidence",
+            data=forecast_table.to_csv(index=False).encode("utf-8"),
+            file_name=f"{_safe_filename_part(explorer_asset)}_{int(explorer_horizon)}d_forecast_evidence.csv",
+            mime="text/csv",
+        )
+    with st.expander("Technical evidence", expanded=False):
+        st.dataframe(explorer_evidence, width="stretch", hide_index=True)
+
+
+elif page == "Portfolio Summary":
+    st.markdown('<p class="main-header">Portfolio Summary</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">A cross-asset view of what to track, watch, wait on, or avoid</p>', unsafe_allow_html=True)
+    render_research_disclaimer()
+    portfolio_plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(portfolio_plans, pd.DataFrame):
+        portfolio_plans = _load_phase26_table("phase26_asset_plans")
+    portfolio_summary = st.session_state.get("phase26_portfolio_plan")
+    if not isinstance(portfolio_summary, pd.DataFrame):
+        portfolio_summary = _load_phase26_table("phase26_portfolio_plan")
+    if portfolio_plans.empty or portfolio_summary.empty:
+        st.warning("No portfolio summary is available. Generate a research plan first.")
+    else:
+        summary = portfolio_summary.iloc[0]
+        render_metric_grid(
+            [
+                {"title": "Track", "value": int(summary.get("TrackCount", 0)), "subtitle": str(summary.get("BestToTrack", "None")), "status": "positive"},
+                {"title": "Watch", "value": int(summary.get("WatchCount", 0)), "subtitle": "Interesting but not strong enough", "status": "info"},
+                {"title": "Wait", "value": int(summary.get("WaitCount", 0)), "subtitle": "More evidence is needed", "status": "neutral"},
+                {"title": "Avoid / High Risk", "value": int(summary.get("AvoidHighRiskCount", 0)), "subtitle": "Risk or weak evidence dominates", "status": "critical"},
+                {"title": "Data Issues", "value": int(summary.get("DataIssueCount", 0)), "subtitle": "Repair before interpretation", "status": "warning"},
+            ]
+        )
+        st.warning(f"Main market risk: {summary.get('MainMarketRisk', '')}")
+        st.info(f"What to recheck next: {summary.get('WhatToRecheckNext', '')}")
+        st.caption(str(summary.get("ApprovalExplanation", "Real-money decisions are not approved.")))
+        for status_group, labels in (
+            ("Track candidates", ["Track"]),
+            ("Watchlist", ["Watch"]),
+            ("Wait", ["Wait", "Not Enough Evidence"]),
+            ("Avoid / High Risk", ["Avoid", "High Risk"]),
+            ("Data Issues", ["Data Issue"]),
+        ):
+            group = portfolio_plans[portfolio_plans["Status"].isin(labels)]
+            with st.expander(status_group, expanded=status_group == "Track candidates"):
+                if group.empty:
+                    st.info(f"No plans currently fall into {status_group.lower()}.")
+                else:
+                    st.dataframe(group[["Asset", "Horizon", "Status", "Confidence", "Summary", "MainRisk", "RecheckWhen"]], width="stretch", hide_index=True)
+
+
+elif page == "About / Methodology":
+    st.markdown('<p class="main-header">About / Methodology</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">How the research assistant turns technical evidence into simple plans</p>', unsafe_allow_html=True)
+    render_research_disclaimer()
+    render_section_header("What the assistant does")
+    st.write(
+        "The assistant combines saved forecast, signal, validation, benchmark, replay, risk, regime, portfolio, "
+        "and freshness evidence. It then assigns a conservative status and explains what would change it."
+    )
+    render_section_header("Status meanings")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                ("Track", "Worth monitoring in research mode."),
+                ("Watch", "Interesting, but not strong enough yet."),
+                ("Wait", "There is no clear reason to prioritize it now."),
+                ("Avoid", "Current evidence or risk is poor."),
+                ("High Risk", "Risk warnings dominate the evidence."),
+                ("Data Issue", "The available evidence cannot be trusted yet."),
+                ("Not Enough Evidence", "More mature or repeated evidence is required."),
+            ],
+            columns=["Status", "Meaning"],
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    render_section_header("What remains advanced")
+    st.write(
+        "Model training, leakage audits, calibration, detailed replay, benchmark diagnostics, quality gates, "
+        "and raw evidence tables remain available under Advanced Diagnostics."
+    )
+
+
+elif page == "Overview Command Center":
     st.markdown('<p class="main-header">Multi-Asset Market Research &amp; Risk Intelligence Platform</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Unified evidence, model validation, signal research, and risk oversight</p>', unsafe_allow_html=True)
     render_research_disclaimer()
@@ -845,7 +1193,7 @@ elif page == "📊 Dataset Explorer":
         csv = df_raw.to_csv().encode("utf-8")
         st.download_button(
             "📥 Download Full Dataset (CSV)", data=csv,
-            file_name="gold_master_dataset.csv", mime="text/csv",
+            file_name="multi_asset_master_dataset.csv", mime="text/csv",
         )
 
 
@@ -2280,7 +2628,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
     )
 
     diag_assets = get_asset_names()
-    diag_default_asset = diag_assets.index("Silver") if "Silver" in diag_assets else 0
+    diag_default_asset = diag_assets.index(selected_asset) if selected_asset in diag_assets else 0
     diag_col_a, diag_col_b, diag_col_c, diag_col_d = st.columns(4)
     with diag_col_a:
         diag_asset = st.selectbox(
@@ -2526,7 +2874,7 @@ elif page == "🛡️ Risk-Controlled Upgrade":
     )
 
     rc_assets = get_asset_names()
-    rc_default_asset = rc_assets.index("Silver") if "Silver" in rc_assets else 0
+    rc_default_asset = rc_assets.index(selected_asset) if selected_asset in rc_assets else 0
     rc_col_a, rc_col_b, rc_col_c, rc_col_d = st.columns(4)
     with rc_col_a:
         rc_asset = st.selectbox("Asset", rc_assets, index=rc_default_asset, key="risk_control_asset")
@@ -7563,7 +7911,7 @@ elif page == "📡 Signal Engine":
         signal_asset = st.selectbox(
             "Asset",
             get_asset_names(),
-            index=get_asset_names().index("Crude Oil") if "Crude Oil" in get_asset_names() else 0,
+            index=get_asset_names().index(selected_asset) if selected_asset in get_asset_names() else 0,
             key="signal_engine_asset",
             help="Crude Oil 5D is a smoke path only. The engine supports all configured assets.",
         )
@@ -7935,11 +8283,22 @@ elif page == "📅 30-Day Forecast":
             st.success(f"✔ {n_days}-day {selected_asset} forecast generated using {model_name}")
 
             viz = Visualizer()
-            fig = viz.plot_forecast_plotly(forecast_df, df_features, n_history_days=90)
+            fig = viz.plot_forecast_plotly(
+                forecast_df,
+                df_features,
+                target_col=active_target_col,
+                asset_label=selected_asset,
+                n_history_days=90,
+            )
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("### Forecast Table")
             st.dataframe(forecast_df, use_container_width=True)
 
             csv = forecast_df.to_csv().encode("utf-8")
-            st.download_button("📥 Download Forecast (CSV)", data=csv, file_name=f"{model_name}_{n_days}day_forecast.csv", mime="text/csv")
+            st.download_button(
+                "📥 Download Forecast (CSV)",
+                data=csv,
+                file_name=f"{_safe_filename_part(selected_asset)}_{_safe_filename_part(model_name)}_{n_days}day_forecast.csv",
+                mime="text/csv",
+            )

@@ -352,41 +352,61 @@ class Visualizer:
         self,
         forecast_df: pd.DataFrame,
         history_df: Optional[pd.DataFrame] = None,
-        target_col: str = "Gold_Close",
+        target_col: Optional[str] = None,
+        asset_label: Optional[str] = None,
         n_history_days: int = 90,
         save_as: Optional[str] = None,
     ) -> plt.Figure:
-        """Plot historical prices followed by the forecasted trajectory (+ confidence bands if present)."""
+        """Plot historical prices followed by the forecasted trajectory."""
         fig, ax = plt.subplots(figsize=(14, 6))
 
         if history_df is not None:
-            recent_hist = history_df[target_col].tail(n_history_days)
-            ax.plot(recent_hist.index, recent_hist.values, label="Historical", color="#1f77b4", linewidth=1.6)
+            if target_col is None:
+                raise ValueError("target_col must be provided when plotting forecast history.")
+            if target_col not in history_df.columns:
+                raise ValueError(f"target_col {target_col!r} was not found in the history dataframe.")
+
+            recent_hist = history_df[target_col].dropna().tail(n_history_days)
+            ax.plot(
+                recent_hist.index,
+                recent_hist.values,
+                label="Historical",
+                color="#1f77b4",
+                linewidth=1.6,
+            )
 
         ax.plot(
-            forecast_df.index, forecast_df["Predicted_Price"],
-            label="Forecast", color=GOLD_COLOR, linewidth=1.8, linestyle="--", marker="o", markersize=3,
+            forecast_df.index,
+            forecast_df["Predicted_Price"],
+            label="Forecast",
+            color=GOLD_COLOR,
+            linewidth=1.8,
+            linestyle="--",
+            marker="o",
+            markersize=3,
         )
 
         if {"Lower_Bound", "Upper_Bound"}.issubset(forecast_df.columns):
             ax.fill_between(
-                forecast_df.index, forecast_df["Lower_Bound"], forecast_df["Upper_Bound"],
-                color=GOLD_COLOR, alpha=0.15, label="95% Confidence Band",
+                forecast_df.index,
+                forecast_df["Lower_Bound"],
+                forecast_df["Upper_Bound"],
+                color=GOLD_COLOR,
+                alpha=0.15,
+                label="95% Confidence Band",
             )
 
+        label = asset_label or (str(target_col).replace("_Close", "") if target_col else "Selected Asset")
         ax.axvline(forecast_df.index[0], color="gray", linestyle=":", linewidth=1)
-        ax.set_title(f"{len(forecast_df)}-Day Gold Price Forecast")
+        ax.set_title(f"{len(forecast_df)}-Day {label} Price Forecast")
         ax.set_xlabel("Date")
-        ax.set_ylabel("Price (USD)")
+        ax.set_ylabel("Price")
         ax.legend(loc="upper left")
         fig.autofmt_xdate()
         fig.tight_layout()
         self._maybe_save(fig, save_as)
         return fig
 
-    # ════════════════════════════════════════════════════════════
-    # 10. RESIDUAL PLOT
-    # ════════════════════════════════════════════════════════════
 
     def plot_residuals(
         self,
@@ -517,7 +537,8 @@ class Visualizer:
         self,
         forecast_df: pd.DataFrame,
         history_df: Optional[pd.DataFrame] = None,
-        target_col: str = "Gold_Close",
+        target_col: Optional[str] = None,
+        asset_label: Optional[str] = None,
         n_history_days: int = 90,
     ):
         """Interactive Plotly forecast chart with confidence bands."""
@@ -526,35 +547,55 @@ class Visualizer:
         fig = go.Figure()
 
         if history_df is not None:
-            recent_hist = history_df[target_col].tail(n_history_days)
+            if target_col is None:
+                raise ValueError("target_col must be provided when plotting forecast history.")
+            if target_col not in history_df.columns:
+                raise ValueError(f"target_col {target_col!r} was not found in the history dataframe.")
+
+            recent_hist = history_df[target_col].dropna().tail(n_history_days)
             fig.add_trace(go.Scatter(
-                x=recent_hist.index, y=recent_hist.values,
-                name="Historical", line=dict(color="#1f77b4", width=2),
+                x=recent_hist.index,
+                y=recent_hist.values,
+                name="Historical",
+                line=dict(color="#1f77b4", width=2),
             ))
 
         if {"Lower_Bound", "Upper_Bound"}.issubset(forecast_df.columns):
             fig.add_trace(go.Scatter(
-                x=forecast_df.index, y=forecast_df["Upper_Bound"],
-                line=dict(width=0), showlegend=False, hoverinfo="skip",
+                x=forecast_df.index,
+                y=forecast_df["Upper_Bound"],
+                line=dict(width=0),
+                showlegend=False,
+                hoverinfo="skip",
             ))
             fig.add_trace(go.Scatter(
-                x=forecast_df.index, y=forecast_df["Lower_Bound"],
-                fill="tonexty", fillcolor="rgba(212,175,55,0.15)",
-                line=dict(width=0), name="95% Confidence Band",
+                x=forecast_df.index,
+                y=forecast_df["Lower_Bound"],
+                fill="tonexty",
+                fillcolor="rgba(212,175,55,0.15)",
+                line=dict(width=0),
+                name="95% Confidence Band",
             ))
 
         fig.add_trace(go.Scatter(
-            x=forecast_df.index, y=forecast_df["Predicted_Price"],
-            name="Forecast", line=dict(color=GOLD_COLOR, width=2, dash="dash"),
-            mode="lines+markers", marker=dict(size=4),
+            x=forecast_df.index,
+            y=forecast_df["Predicted_Price"],
+            name="Forecast",
+            line=dict(color=GOLD_COLOR, width=2, dash="dash"),
+            mode="lines+markers",
+            marker=dict(size=4),
         ))
 
+        label = asset_label or (str(target_col).replace("_Close", "") if target_col else "Selected Asset")
         fig.update_layout(
-            title=f"{len(forecast_df)}-Day Gold Price Forecast",
-            xaxis_title="Date", yaxis_title="Price (USD)",
-            template="plotly_dark", hovermode="x unified",
+            title=f"{len(forecast_df)}-Day {label} Price Forecast",
+            xaxis_title="Date",
+            yaxis_title="Price",
+            template="plotly_dark",
+            hovermode="x unified",
         )
         return fig
+
 
     def plot_model_comparison_plotly(
         self,
