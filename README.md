@@ -1,4 +1,4 @@
-# Multi-Asset Market Research & Risk Analytics Platform
+# Multi-Asset Market Research & Risk Intelligence Platform
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square\&logo=python)
 ![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red?style=flat-square\&logo=streamlit)
@@ -6,17 +6,17 @@
 ![Pytest](https://img.shields.io/badge/Tests-Pytest-green?style=flat-square)
 ![Research Only](https://img.shields.io/badge/Status-Research%20Only-lightgrey?style=flat-square)
 
-A research-only platform for multi-asset forecasting, signal analysis, risk intelligence, historical replay, and benchmark auditing across financial markets.
+A research-only platform for multi-asset forecasting, signal validation, benchmark comparison, risk intelligence, historical replay, and benchmark auditing across financial markets.
 
 The project is designed as an engineering and research system, not as a trading shortcut. It focuses on time-series-safe validation, reproducible outputs, conservative risk controls, and honest benchmark comparison.
 
-> **Disclaimer:** This project is for educational and research purposes only. It is not financial advice, does not guarantee profits, and does not execute real-money trades.
+> **Disclaimer:** This project is for educational and research purposes only. It is not financial advice, does not promise profitable outcomes, and does not execute real-money trades.
 
 ---
 
 ## Overview
 
-This project started as a gold price prediction system and was expanded into a multi-asset market research platform. It combines data processing, feature engineering, forecasting, signal research, paper-tracking logic, risk controls, regime analysis, benchmark comparison, and Streamlit-based visualization.
+This project started as a gold price prediction system and was expanded into a multi-asset market research platform. It now studies Gold, Silver, Crude Oil, Bitcoin, S&P 500, and Gold ETF using a comprehensive evidence-first research pipeline.
 
 The main goal is to answer a practical research question:
 
@@ -61,17 +61,18 @@ The system supports multiple forecast horizons, including short-term and longer-
 
 ### 3. Forecasting and Validation
 
-* Machine learning based forecasting workflow.
+* Machine-learning-based forecasting workflow.
 * Time-series-aware validation instead of random train-test splitting.
 * Walk-forward style testing for more realistic evaluation.
 * Prediction range logic to avoid presenting point forecasts as certain outcomes.
 
-### 4. Signal Research
+### 4. Research Signal Layer
 
 * Converts model outputs into research-only signal candidates.
 * Separates signal generation from real-money action.
 * Tracks pending and matured paper signals.
 * Evaluates whether signals are useful across different assets and horizons.
+* Uses research-only labels such as `PaperTrackCandidate`, `WatchlistOnly`, `NeutralResearch`, `HighRiskResearchOnly`, and `RejectedForNow`.
 
 ### 5. Risk Intelligence
 
@@ -85,13 +86,13 @@ The system supports multiple forecast horizons, including short-term and longer-
 
 * Detects broad market and asset-level conditions.
 * Applies regime-based adjustments to paper exposure.
-* Flags unfavorable or dangerous market environments.
-* Reduces confidence when market conditions are unstable.
+* Flags unfavorable or unstable market environments.
+* Reduces confidence when market conditions are unreliable.
 
 ### 7. Benchmark and Replay Engine
 
 * Compares research signals against baseline strategies such as hold-only, no-exposure, momentum-style, moving-average-style, and random baselines.
-* Uses historical replay/proxy replay logic to test whether signal rules show evidence of edge.
+* Uses historical replay and proxy replay logic to test whether signal rules show evidence of edge.
 * Avoids claiming model strength when evidence is insufficient.
 * Tracks dominance failures when strategies lose to simpler baselines.
 
@@ -104,6 +105,7 @@ The system supports multiple forecast horizons, including short-term and longer-
 ### 9. Streamlit Dashboard
 
 * Interactive dashboard for viewing forecasts, signals, risk analysis, benchmark audits, historical replay outputs, and research summaries.
+* Includes guided workflow, data freshness checks, glossary explanations, and premium command-center style pages.
 * Designed for exploration and review, not for automated trading execution.
 
 ### 10. Testing and Quality Checks
@@ -146,16 +148,19 @@ Feature Engineering and Technical Indicators
 Forecasting and Prediction Range Logic
         |
         v
-Signal Research and Paper Tracking
+Research Signal Generation and Paper Tracking
         |
         v
 Risk Intelligence and Position Sizing
         |
         v
-Regime Analysis and Benchmark Audits
+Regime Analysis, Benchmark Audits, and Replay Engines
         |
         v
-Streamlit Dashboard and Artifact Store
+Unified Risk Command Center and Streamlit Dashboard
+        |
+        v
+Artifact Store and Quality Gates
 ```
 
 ---
@@ -174,30 +179,50 @@ GoldPricePrediction/
 ├── config/
 │   └── config.yaml
 |
-├── data/
-│   ├── raw/
-│   └── processed/
-|
 ├── src/
+│   ├── app_context.py
+│   ├── artifact_store.py
 │   ├── data_loader.py
 │   ├── preprocessing.py
 │   ├── indicators.py
 │   ├── feature_engineering.py
-│   ├── train.py
 │   ├── prediction.py
 │   ├── prediction_ranges.py
+│   ├── predict.py
 │   ├── signals.py
 │   ├── backtesting.py
-│   ├── asset_config.py
+│   ├── action_plan_engine.py
+│   ├── daily_research_center.py
+│   ├── portfolio_capital_simulator.py
+│   ├── risk_warning_intelligence.py
+│   ├── dynamic_risk_sizing.py
+│   ├── market_regime_intelligence.py
+│   ├── strategy_benchmark_arena.py
+│   ├── historical_model_replay.py
+│   ├── replay_benchmark_audit.py
+│   ├── signal_policy_edge_lab.py
+│   ├── true_historical_ml_replay.py
+│   ├── prediction_edge_improvement.py
+│   ├── unified_risk_command_center.py
+│   ├── workflow_guide.py
+│   ├── explanation_glossary.py
+│   ├── ui_components.py
 │   └── utils.py
 |
 ├── tests/
-│   └── test_phase1_modules.py
+│   ├── test_forecast_feature_schema.py
+│   ├── test_phase20_true_historical_ml_replay.py
+│   ├── test_phase21_unified_risk_command_center.py
+│   ├── test_phase22_prediction_edge_improvement.py
+│   ├── test_phase23_multiasset_workflow.py
+│   └── test_phase24_premium_ui.py
 |
+├── data/
+├── models/
 └── artifacts/
 ```
 
-Note: Generated artifacts, caches, virtual environments, and secret files should not be committed to the public repository.
+Generated datasets, model binaries, artifacts, caches, virtual environments, and secret files should not be committed to the public repository unless they are intentionally prepared as small demo assets.
 
 ---
 
@@ -258,7 +283,7 @@ Then open the local URL shown in the terminal, usually:
 http://localhost:8501
 ```
 
-### Run module checks
+### Run selected module checks
 
 ```bash
 python -m src.prediction_ranges
@@ -270,6 +295,12 @@ python -m src.backtesting
 
 ```bash
 python -m pytest tests -q
+```
+
+For a faster recent-regression check:
+
+```bash
+python -m pytest tests/test_phase20_true_historical_ml_replay.py tests/test_phase21_unified_risk_command_center.py tests/test_phase22_prediction_edge_improvement.py tests/test_phase23_multiasset_workflow.py tests/test_phase24_premium_ui.py -q
 ```
 
 ---
@@ -310,12 +341,12 @@ Important design decisions:
 This project does not:
 
 * Provide financial advice.
-* Guarantee profitable trades.
+* Promise profitable outcomes.
 * Execute real-money orders.
-* Claim that forecasting accuracy alone is enough for a trading strategy.
+* Claim that forecasting accuracy alone is enough for a market strategy.
 * Hide weak results or failed benchmarks.
 
-The goal is to build a transparent research system that can honestly show both strengths and weaknesses.
+This repository is maintained as a research and paper-evidence system. Real-capital use remains blocked by the platform's validation and risk gates.
 
 ---
 
@@ -331,24 +362,32 @@ Examples of checks included in the workflow:
 * Benchmark comparison checks.
 * Data-quality warnings.
 * Research-output consistency checks.
+* Missing-artifact handling.
+* User-facing wording checks.
 
 ---
 
-## Suggested `.gitignore`
+## Public Repository Policy
 
 The public repository should avoid secrets, local environments, generated artifacts, and cache files.
 
-```gitignore
+Do not commit:
+
+```text
 venv/
-__pycache__/
-*.pyc
 .env
 .streamlit/secrets.toml
+__pycache__/
+.pytest_cache/
+data/raw/
+data/processed/
+models/
 artifacts/
 *.zip
-.ipynb_checkpoints/
-.DS_Store
+*.log
 ```
+
+The repository is designed to keep source code, configuration, tests, and documentation public while excluding heavy local research outputs unless a deployment-specific demo snapshot is intentionally prepared.
 
 ---
 
@@ -356,6 +395,8 @@ artifacts/
 
 Planned improvements include:
 
+* Deployment hardening for public demo environments.
+* Graceful demo mode when data, models, or artifacts are missing.
 * Cleaner historical replay with true saved model snapshots.
 * Stronger out-of-sample evaluation.
 * More robust transaction-cost modeling.
@@ -379,4 +420,4 @@ LinkedIn: [Poojan Bhardwaj](https://www.linkedin.com/in/poojan-bhardwaj-22b36b38
 
 ## License
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+No formal license file is included by default. Add a `LICENSE` file before publishing a specific open-source license.

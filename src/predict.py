@@ -29,6 +29,7 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 from src.config_loader import ConfigLoader
+from src.feature_intelligence import add_phase5_feature_intelligence
 from src.logger import get_logger
 from src.utils import ensure_dir, load_model, timer
 from src.prediction_ranges import calculate_prediction_range
@@ -36,6 +37,95 @@ from src.signals import generate_trading_signal
 
 logger = get_logger(__name__)
 cfg    = ConfigLoader()
+
+
+FEATURE_SCHEMA_MISMATCH_MESSAGE = (
+    "Model feature schema mismatch. Retrain/regenerate model artifacts."
+)
+
+
+def validate_feature_schema(
+    enriched_df: pd.DataFrame,
+    feature_cols: List[str],
+    context: str = "forecast",
+) -> Dict[str, Any]:
+    """Validate that a prediction frame can satisfy the trained feature contract."""
+    expected = list(feature_cols)
+    available = list(enriched_df.columns)
+    available_set = set(available)
+    expected_set = set(expected)
+    missing = [col for col in expected if col not in available_set]
+    extra = [col for col in available if col not in expected_set]
+    safe = not missing
+
+    if safe:
+        message = (
+            f"{context}: feature schema aligned "
+            f"({len(expected)} expected, {len(available)} available)."
+        )
+    else:
+        preview = ", ".join(missing[:12])
+        if len(missing) > 12:
+            preview += f", ... (+{len(missing) - 12} more)"
+        message = (
+            f"{FEATURE_SCHEMA_MISMATCH_MESSAGE} "
+            f"Context={context}; missing required features: {preview}."
+        )
+
+    return {
+        "missing_columns": missing,
+        "extra_columns": extra,
+        "missing": missing,
+        "extra": extra,
+        "safe": safe,
+        "message": message,
+        "expected_count": len(expected),
+        "available_count": len(available),
+    }
+
+
+def build_forecast_feature_frame(
+    raw_history: pd.DataFrame,
+    *,
+    target_col: str,
+    indicators_engine: Any,
+    feature_engineer: Any,
+) -> pd.DataFrame:
+    """Rebuild forecast features through the same path used for training."""
+    enriched = indicators_engine.add_all(raw_history.copy())
+    enriched = enriched.sort_index().ffill()
+    enriched = feature_engineer.build_features(enriched)
+    return add_phase5_feature_intelligence(enriched, target_col=target_col)
+
+
+def _require_forecast_feature_schema(
+    frame: pd.DataFrame,
+    feature_cols: List[str],
+    *,
+    target_col: str,
+    context: str,
+    derive_phase5: bool = False,
+) -> pd.DataFrame:
+    """Derive eligible Phase 5 features, then enforce the model schema."""
+    checked = frame
+    validation = validate_feature_schema(checked, feature_cols, context=context)
+    missing_fi = [
+        col for col in validation["missing_columns"] if str(col).startswith("FI_")
+    ]
+
+    if missing_fi and derive_phase5 and target_col in checked.columns:
+        checked = add_phase5_feature_intelligence(checked, target_col=target_col)
+        validation = validate_feature_schema(checked, feature_cols, context=context)
+
+    if not validation["safe"]:
+        logger.error(validation["message"])
+        raise ValueError(validation["message"])
+    if checked.empty:
+        raise ValueError(
+            f"{FEATURE_SCHEMA_MISMATCH_MESSAGE} Context={context}; "
+            "feature generation produced no usable historical rows."
+        )
+    return checked
 
 
 class Predictor:
@@ -294,7 +384,8 @@ class Predictor:
             # called build_features() on it repeatedly.
             raw_cols = [
                 c for c in df.columns
-                if not any(
+                if not str(c).startswith("FI_")
+                and not any(
                     marker in c for marker in (
                         "_lag", "_roll_", "Return", "Volatility", "Ratio",
                         "Trend", "Acceleration", "DayOfWeek", "Month", "Quarter",
@@ -326,11 +417,28 @@ class Predictor:
                 # caller, before model training). This recomputes lags,
                 # rolling stats, RSI, etc. so they genuinely reflect the
                 # latest predicted price rather than staying frozen.
-                enriched = indicators_engine.add_all(raw_history)
-                enriched = feature_engineer.build_features(enriched)
+                enriched = build_forecast_feature_frame(
+                    raw_history,
+                    target_col=target_col,
+                    indicators_engine=indicators_engine,
+                    feature_engineer=feature_engineer,
+                )
+                enriched = _require_forecast_feature_schema(
+                    enriched,
+                    feature_cols,
+                    target_col=target_col,
+                    context=f"forecast date {date.date()}",
+                )
                 latest_row = enriched[feature_cols].values[-1:].copy()
                 window_source = enriched
             else:
+                history = _require_forecast_feature_schema(
+                    history,
+                    feature_cols,
+                    target_col=target_col,
+                    context=f"simplified forecast date {date.date()}",
+                    derive_phase5=True,
+                )
                 latest_row = history[feature_cols].values[-1:].copy()
                 window_source = history
 

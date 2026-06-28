@@ -74,3 +74,11 @@ nextactions.csv
 .idea/
 .DS_Store
 Thumbs.db
+
+# Temporary root scripts
+debug_*.py
+patch_*.py
+test_feature_*.py
+text.py
+streamlit_integration/
+requirements_additions.txt

@@ -1,12 +1,12 @@
 # ============================================================
-# Gold Price Prediction - Master Configuration
+# Multi-Asset Market Research & Risk Intelligence - Master Configuration
 # ============================================================
 
 project:
-  name: "AI-Based Gold Price Prediction"
+  name: "GoldPricePrediction-QuantSystem"
   version: "1.0.0"
-  author: "B.Tech Final Year Project"
-  description: "ML & DL based gold price forecasting system"
+  author: "Poojan Bhardwaj"
+  description: "Multi-asset forecasting, validation, evidence, and risk intelligence platform"
 
 # ── Paths ────────────────────────────────────────────────────
 paths:
