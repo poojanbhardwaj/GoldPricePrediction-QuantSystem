@@ -1,7 +1,7 @@
 """
-src — Gold Price Prediction Source Package
-==========================================
-Modular ML/DL pipeline for gold price forecasting.
+src - Multi-Asset Market Research & Risk Intelligence Platform
+===============================================================
+Modular forecasting, validation, evidence, and risk research package.
 
 Submodules
 ----------
@@ -18,4 +18,5 @@ utils           : Shared helper functions
 """
 
 __version__ = "1.0.0"
-__author__  = "B.Tech Final Year Project"
+__author__  = "Poojan Bhardwaj"
+__project__ = "Multi-Asset Market Research & Risk Intelligence Platform"

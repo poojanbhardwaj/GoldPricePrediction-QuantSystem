@@ -1,4 +1,4 @@
-# 🥇 AI-Based Gold Price Prediction Using Machine Learning & Deep Learning
+# Multi-Asset Market Research & Risk Intelligence Platform
 
 <div align="center">
 
@@ -9,7 +9,7 @@
 ![XGBoost](https://img.shields.io/badge/XGBoost-2.0%2B-yellow?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)
 
-**A production-grade B.Tech Final Year Project for forecasting gold prices using state-of-the-art ML & DL models**
+**A research-only platform for multi-asset forecasting, signal validation, benchmark comparison, and risk intelligence**
 
 [Features](#-features) • [Architecture](#-architecture) • [Installation](#-installation) • [Usage](#-usage) • [Results](#-results) • [Deployment](#-deployment)
 
@@ -19,7 +19,7 @@
 
 ## 📌 Abstract
 
-Gold is one of the most actively traded commodities in the world, serving as a hedge against inflation and currency risk. Accurate gold price prediction has significant implications for investors, financial institutions, and policymakers. This project develops a comprehensive end-to-end AI pipeline that:
+The platform studies Gold, Silver, Crude Oil, Bitcoin, S&P 500, and Gold ETF using a comprehensive evidence-first research pipeline that:
 
 1. Collects and merges **12+ macroeconomic and market datasets** (Gold, Silver, Oil, Bitcoin, DXY, S&P 500, VIX, Treasury Yields, CPI, Fed Rate)
 2. Engineers **100+ features** including technical indicators, lag features, rolling statistics, and calendar variables
@@ -167,8 +167,8 @@ GoldPricePrediction/
 
 ### Step 1: Clone the Repository
 ```bash
-git clone https://github.com/yourusername/GoldPricePrediction.git
-cd GoldPricePrediction
+git clone https://github.com/poojanbhardwaj/GoldPricePrediction-QuantSystem.git
+cd GoldPricePrediction-QuantSystem
 ```
 
 ### Step 2: Create Virtual Environment
@@ -294,11 +294,9 @@ docker run -p 8501:8501 --env-file .env gold-prediction
 
 ---
 
-## 👨‍💻 Author
+## Research Status
 
-**B.Tech Final Year Project**  
-Department of Computer Science & Engineering / AI & ML  
-Academic Year: 2024–25
+This repository is maintained as a research and paper-evidence system. Real-capital use remains blocked by the platform's validation and risk gates.
 
 ---
 

@@ -1,6 +1,6 @@
 # ============================================================
-# AI-Based Gold Price Prediction - Requirements
-# Author: B.Tech Final Year Project
+# Multi-Asset Market Research & Risk Intelligence Platform - Requirements
+# Author: Poojan Bhardwaj
 # Version: 1.0.0
 # ============================================================
 

@@ -23,14 +23,14 @@ class TradingSignal:
 
 def _base_signal(predicted_return_pct: float) -> str:
     if predicted_return_pct > 1.0:
-        return "Strong Buy"
+        return "PaperTrackCandidate"
     if 0.2 <= predicted_return_pct <= 1.0:
-        return "Buy"
+        return "WatchlistOnly"
     if -0.2 < predicted_return_pct < 0.2:
-        return "Hold"
+        return "NeutralResearch"
     if -1.0 <= predicted_return_pct <= -0.2:
-        return "Avoid"
-    return "Sell / High Risk"
+        return "RejectedForNow"
+    return "HighRiskResearchOnly"
 
 
 def _risk_label(predicted_return_pct: float, range_width_pct: Optional[float]) -> str:
