@@ -1,316 +1,423 @@
 # Multi-Asset Market Research & Risk Intelligence Platform
 
-<div align="center">
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square\&logo=python)
+![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-red?style=flat-square\&logo=streamlit)
+![scikit-learn](https://img.shields.io/badge/scikit--learn-ML-orange?style=flat-square\&logo=scikitlearn)
+![Pytest](https://img.shields.io/badge/Tests-Pytest-green?style=flat-square)
+![Research Only](https://img.shields.io/badge/Status-Research%20Only-lightgrey?style=flat-square)
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
-![TensorFlow](https://img.shields.io/badge/TensorFlow-2.13%2B-orange?style=for-the-badge&logo=tensorflow)
-![Scikit-Learn](https://img.shields.io/badge/ScikitLearn-1.3%2B-green?style=for-the-badge&logo=scikit-learn)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-red?style=for-the-badge&logo=streamlit)
-![XGBoost](https://img.shields.io/badge/XGBoost-2.0%2B-yellow?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)
+A research-only platform for multi-asset forecasting, signal validation, benchmark comparison, risk intelligence, historical replay, and benchmark auditing across financial markets.
 
-**A research-only platform for multi-asset forecasting, signal validation, benchmark comparison, and risk intelligence**
+The project is designed as an engineering and research system, not as a trading shortcut. It focuses on time-series-safe validation, reproducible outputs, conservative risk controls, and honest benchmark comparison.
 
-[Features](#-features) • [Architecture](#-architecture) • [Installation](#-installation) • [Usage](#-usage) • [Results](#-results) • [Deployment](#-deployment)
-
-</div>
+> **Disclaimer:** This project is for educational and research purposes only. It is not financial advice, does not promise profitable outcomes, and does not execute real-money trades.
 
 ---
 
-## 📌 Abstract
+## Overview
 
-The platform studies Gold, Silver, Crude Oil, Bitcoin, S&P 500, and Gold ETF using a comprehensive evidence-first research pipeline that:
+This project started as a gold price prediction system and was expanded into a multi-asset market research platform. It now studies Gold, Silver, Crude Oil, Bitcoin, S&P 500, and Gold ETF using a comprehensive evidence-first research pipeline.
 
-1. Collects and merges **12+ macroeconomic and market datasets** (Gold, Silver, Oil, Bitcoin, DXY, S&P 500, VIX, Treasury Yields, CPI, Fed Rate)
-2. Engineers **100+ features** including technical indicators, lag features, rolling statistics, and calendar variables
-3. Trains and compares **13 models** — 7 ML (Linear Regression, Decision Tree, Random Forest, XGBoost, LightGBM, CatBoost, SVR) and 6 DL (LSTM, BiLSTM, GRU, CNN-LSTM, Transformer, TFT)
-4. Evaluates every model on **5 metrics**: MAE, RMSE, MAPE, R², Directional Accuracy
-5. Delivers a **professional Streamlit dashboard** with real-time data, interactive charts, 30-day forecasts, and CSV export
+The main goal is to answer a practical research question:
 
----
+> Can a forecasting and signal pipeline produce evidence that is strong enough to beat simple baselines after costs, risk controls, regime filters, and validation checks?
 
-## ✨ Features
-
-| Category | Details |
-|---|---|
-| **Data Sources** | yfinance (Gold, Silver, Oil, BTC, DXY, S&P 500, VIX), FRED API (CPI, Fed Rate) |
-| **Preprocessing** | Missing value handling, outlier removal, normalization, TimeSeriesSplit |
-| **Technical Indicators** | SMA, EMA, RSI, MACD, Bollinger Bands, ATR, ADX, CCI, Stochastic RSI, Williams %R, MFI, OBV, VWAP, Ichimoku Cloud |
-| **Feature Engineering** | Lag features (1–30 days), rolling stats, ratios (Gold/Silver, Gold/Oil), volatility, calendar features |
-| **ML Models** | Linear Regression, Decision Tree, Random Forest, XGBoost, LightGBM, CatBoost, SVR |
-| **DL Models** | LSTM, Bidirectional LSTM, GRU, CNN-LSTM, Transformer, Temporal Fusion Transformer |
-| **Evaluation** | MAE, RMSE, MAPE, R², Directional Accuracy, Training Time, Inference Time |
-| **Visualizations** | Actual vs Predicted, Loss Curves, Correlation Heatmap, Feature Importance, Candlestick, RSI, MACD, 30-day Forecast |
-| **Dashboard** | Streamlit app with dark theme, interactive Plotly charts, model training UI, forecast download |
-| **Explainability** | SHAP values, feature importance plots |
-| **Optimization** | Optuna hyperparameter tuning, early stopping, model checkpointing |
-| **Deployment** | Docker, Streamlit Cloud, Render, Railway |
+The system is intentionally conservative. It separates research signals from real-money decisions and blocks real-capital recommendations unless strict evidence gates are satisfied.
 
 ---
 
-## 🏗️ Architecture
+## Supported Assets
 
+The platform is structured around multiple asset classes:
+
+| Asset     | Category     |
+| --------- | ------------ |
+| Gold      | Commodity    |
+| Silver    | Commodity    |
+| Crude Oil | Energy       |
+| Bitcoin   | Crypto       |
+| S&P 500   | Equity Index |
+| Gold ETF  | ETF          |
+
+The system supports multiple forecast horizons, including short-term and longer-horizon research windows such as 1D, 5D, 10D, 20D, and 30D.
+
+---
+
+## Core Features
+
+### 1. Multi-Asset Data Pipeline
+
+* Downloads and processes market data from public financial data sources.
+* Supports cross-asset feature construction.
+* Handles missing values, date alignment, scaling, outlier checks, and time-series splits.
+* Maintains a structured dataset for downstream forecasting and research modules.
+
+### 2. Feature Engineering
+
+* Technical indicators such as moving averages, RSI, MACD, Bollinger-style volatility features, and rolling statistics.
+* Lag-based features and return-based features.
+* Cross-asset ratios and relative market indicators.
+* Calendar-based features for time-series modeling.
+
+### 3. Forecasting and Validation
+
+* Machine-learning-based forecasting workflow.
+* Time-series-aware validation instead of random train-test splitting.
+* Walk-forward style testing for more realistic evaluation.
+* Prediction range logic to avoid presenting point forecasts as certain outcomes.
+
+### 4. Research Signal Layer
+
+* Converts model outputs into research-only signal candidates.
+* Separates signal generation from real-money action.
+* Tracks pending and matured paper signals.
+* Evaluates whether signals are useful across different assets and horizons.
+* Uses research-only labels such as `PaperTrackCandidate`, `WatchlistOnly`, `NeutralResearch`, `HighRiskResearchOnly`, and `RejectedForNow`.
+
+### 5. Risk Intelligence
+
+* Drawdown-aware risk checks.
+* Cost and slippage sensitivity.
+* Exposure caps and paper-allocation limits.
+* Data-quality warnings.
+* Conservative handling of missing or unreliable information.
+
+### 6. Market Regime Analysis
+
+* Detects broad market and asset-level conditions.
+* Applies regime-based adjustments to paper exposure.
+* Flags unfavorable or unstable market environments.
+* Reduces confidence when market conditions are unreliable.
+
+### 7. Benchmark and Replay Engine
+
+* Compares research signals against baseline strategies such as hold-only, no-exposure, momentum-style, moving-average-style, and random baselines.
+* Uses historical replay and proxy replay logic to test whether signal rules show evidence of edge.
+* Avoids claiming model strength when evidence is insufficient.
+* Tracks dominance failures when strategies lose to simpler baselines.
+
+### 8. Artifact Store and Reproducibility
+
+* Saves generated research outputs in a structured artifact directory.
+* Keeps summaries, leaderboards, risk tables, benchmark results, and quality gates available after reruns.
+* Helps make the research workflow easier to inspect and reproduce.
+
+### 9. Streamlit Dashboard
+
+* Interactive dashboard for viewing forecasts, signals, risk analysis, benchmark audits, historical replay outputs, and research summaries.
+* Includes guided workflow, data freshness checks, glossary explanations, and premium command-center style pages.
+* Designed for exploration and review, not for automated trading execution.
+
+### 10. Testing and Quality Checks
+
+* Pytest-based checks for important project modules.
+* Validation for leakage checks, benchmark sanity, exposure caps, data-quality handling, and research-output consistency.
+* Designed to catch misleading results before they appear in the dashboard.
+
+---
+
+## Tech Stack
+
+| Area              | Tools                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| Language          | Python                                                                             |
+| Data Processing   | pandas, NumPy                                                                      |
+| Market Data       | yfinance, pandas-datareader, optional FRED data                                    |
+| Machine Learning  | scikit-learn, XGBoost, LightGBM, CatBoost                                          |
+| Visualization     | Streamlit, Plotly, Matplotlib                                                      |
+| Testing           | pytest                                                                             |
+| Project Structure | Modular Python package with `src/`, `tests/`, `config/`, and dashboard entry point |
+
+---
+
+## Project Architecture
+
+```text
+Market Data Sources
+        |
+        v
+Data Loader and Raw Data Storage
+        |
+        v
+Preprocessing and Date Alignment
+        |
+        v
+Feature Engineering and Technical Indicators
+        |
+        v
+Forecasting and Prediction Range Logic
+        |
+        v
+Research Signal Generation and Paper Tracking
+        |
+        v
+Risk Intelligence and Position Sizing
+        |
+        v
+Regime Analysis, Benchmark Audits, and Replay Engines
+        |
+        v
+Unified Risk Command Center and Streamlit Dashboard
+        |
+        v
+Artifact Store and Quality Gates
 ```
-Raw Data (yfinance + FRED)
-         │
-         ▼
-┌─────────────────────┐
-│   Data Ingestion    │  ← data_loader.py
-│  (12 data sources)  │
-└─────────────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│   Preprocessing     │  ← preprocessing.py
-│ Missing / Outliers  │
-│ Scaling / Splitting │
-└─────────────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│ Technical Indicators│  ← indicators.py
-│  RSI, MACD, BB, ... │
-└─────────────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│Feature Engineering  │  ← feature_engineering.py
-│ Lag / Roll / Ratios │
-└─────────────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌────────┐
-│  ML    │ │  DL    │  ← train.py
-│ Models │ │ Models │
-└────────┘ └────────┘
-    │         │
-    └────┬────┘
-         ▼
-┌─────────────────────┐
-│    Evaluation &     │  ← predict.py + visualization.py
-│    Comparison       │
-└─────────────────────┘
-         │
-         ▼
-┌─────────────────────┐
-│  Streamlit Dashboard│  ← app.py
-│  (Interactive UI)   │
-└─────────────────────┘
-```
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
-```
+```text
 GoldPricePrediction/
-│
-├── config/
-│   └── config.yaml              # Master configuration file
-│
-├── data/
-│   ├── raw/                     # Downloaded raw CSV files
-│   ├── processed/               # Cleaned & feature-engineered data
-│   └── external/                # External datasets (CPI, Fed Rate)
-│
-├── logs/                        # Rotating log files
-│
-├── models/
-│   ├── saved/                   # Serialized trained models (.pkl, .h5)
-│   ├── checkpoints/             # DL training checkpoints
-│   └── versions/                # MLflow model versions
-│
-├── notebooks/
-│   ├── 01_EDA.ipynb             # Exploratory Data Analysis
-│   ├── 02_Feature_Engineering.ipynb
-│   ├── 03_ML_Models.ipynb
-│   ├── 04_DL_Models.ipynb
-│   └── 05_Evaluation.ipynb
-│
-├── src/
-│   ├── __init__.py
-│   ├── config_loader.py         # YAML config singleton
-│   ├── logger.py                # Centralized logging
-│   ├── utils.py                 # Shared utilities & metrics
-│   ├── data_loader.py           # Data ingestion (yfinance + FRED)
-│   ├── preprocessing.py         # Cleaning, scaling, splitting
-│   ├── indicators.py            # Technical indicator computation
-│   ├── feature_engineering.py   # Feature creation pipeline
-│   ├── train.py                 # Model training orchestrator
-│   ├── predict.py               # Inference & 30-day forecast
-│   └── visualization.py         # Professional chart generation
-│
-├── tests/
-│   ├── test_preprocessing.py
-│   ├── test_indicators.py
-│   └── test_models.py
-│
-├── app.py                       # Streamlit dashboard entry point
-├── run_pipeline.py              # CLI: run complete pipeline
+|
+├── app.py
 ├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
+├── README.md
 ├── .env.example
 ├── .gitignore
-└── README.md
+|
+├── config/
+│   └── config.yaml
+|
+├── src/
+│   ├── app_context.py
+│   ├── artifact_store.py
+│   ├── data_loader.py
+│   ├── preprocessing.py
+│   ├── indicators.py
+│   ├── feature_engineering.py
+│   ├── prediction.py
+│   ├── prediction_ranges.py
+│   ├── predict.py
+│   ├── signals.py
+│   ├── backtesting.py
+│   ├── action_plan_engine.py
+│   ├── daily_research_center.py
+│   ├── portfolio_capital_simulator.py
+│   ├── risk_warning_intelligence.py
+│   ├── dynamic_risk_sizing.py
+│   ├── market_regime_intelligence.py
+│   ├── strategy_benchmark_arena.py
+│   ├── historical_model_replay.py
+│   ├── replay_benchmark_audit.py
+│   ├── signal_policy_edge_lab.py
+│   ├── true_historical_ml_replay.py
+│   ├── prediction_edge_improvement.py
+│   ├── unified_risk_command_center.py
+│   ├── workflow_guide.py
+│   ├── explanation_glossary.py
+│   ├── ui_components.py
+│   └── utils.py
+|
+├── tests/
+│   ├── test_forecast_feature_schema.py
+│   ├── test_phase20_true_historical_ml_replay.py
+│   ├── test_phase21_unified_risk_command_center.py
+│   ├── test_phase22_prediction_edge_improvement.py
+│   ├── test_phase23_multiasset_workflow.py
+│   └── test_phase24_premium_ui.py
+|
+├── data/
+├── models/
+└── artifacts/
 ```
+
+Generated datasets, model binaries, artifacts, caches, virtual environments, and secret files should not be committed to the public repository unless they are intentionally prepared as small demo assets.
 
 ---
 
-## ⚙️ Installation
+## Installation
 
-### Prerequisites
-- Python 3.10+
-- pip or conda
-- Git
+### 1. Clone the repository
 
-### Step 1: Clone the Repository
 ```bash
 git clone https://github.com/poojanbhardwaj/GoldPricePrediction-QuantSystem.git
 cd GoldPricePrediction-QuantSystem
 ```
 
-### Step 2: Create Virtual Environment
-```bash
-# Using venv
-python -m venv venv
-source venv/bin/activate        # Linux/Mac
-venv\Scripts\activate           # Windows
+### 2. Create and activate a virtual environment
 
-# OR using conda
-conda create -n goldpred python=3.10
-conda activate goldpred
+Windows PowerShell:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 ```
 
-### Step 3: Install Dependencies
+Linux/macOS:
+
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4: Configure API Keys
+### 4. Configure optional environment variables
+
+If the project uses external APIs such as FRED, create a local `.env` file from the example file:
+
 ```bash
 cp .env.example .env
-# Edit .env and add your FRED API key (free at fred.stlouisfed.org)
 ```
 
-### Step 5: Verify Installation
-```bash
-python -c "from src.config_loader import ConfigLoader; print(ConfigLoader())"
-```
+Then add your own local keys. Do not commit real API keys.
 
 ---
 
-## 🚀 Usage
+## Usage
 
-### Option A: Run Complete Pipeline
-```bash
-python run_pipeline.py
-```
+### Run the Streamlit dashboard
 
-### Option B: Run Step-by-Step
-```bash
-# 1. Download data
-python -c "from src.data_loader import DataLoader; DataLoader().download_all()"
-
-# 2. Preprocess
-python -c "from src.preprocessing import Preprocessor; Preprocessor().run()"
-
-# 3. Train models
-python -c "from src.train import ModelTrainer; ModelTrainer().train_all()"
-
-# 4. Launch dashboard
-streamlit run app.py
-```
-
-### Option C: Streamlit Dashboard Only
 ```bash
 streamlit run app.py
 ```
-Open browser at `http://localhost:8501`
 
----
+Then open the local URL shown in the terminal, usually:
 
-## 📊 Model Performance (Sample Results)
-
-| Rank | Model | MAE | RMSE | MAPE | R² | Dir. Acc |
-|------|-------|-----|------|------|----|----------|
-| 1 | XGBoost | 8.24 | 12.31 | 0.43% | 0.9921 | 68.4% |
-| 2 | LightGBM | 8.89 | 13.05 | 0.47% | 0.9908 | 67.1% |
-| 3 | BiLSTM | 9.12 | 13.78 | 0.49% | 0.9897 | 66.8% |
-| 4 | LSTM | 9.45 | 14.22 | 0.51% | 0.9889 | 65.9% |
-| 5 | CatBoost | 9.71 | 14.89 | 0.52% | 0.9878 | 65.2% |
-| 6 | Random Forest | 11.34 | 17.23 | 0.61% | 0.9831 | 63.4% |
-| 7 | Transformer | 10.89 | 16.12 | 0.57% | 0.9848 | 64.7% |
-
-> *Results vary with market conditions and training window.*
-
----
-
-## 🐳 Deployment
-
-### Docker
-```bash
-docker build -t gold-prediction .
-docker run -p 8501:8501 --env-file .env gold-prediction
+```text
+http://localhost:8501
 ```
 
-### Streamlit Cloud
-1. Push to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Connect repo → set `app.py` as entry point
-4. Add secrets in dashboard settings
+### Run selected module checks
 
-### Render
 ```bash
-# render.yaml is included — connect GitHub repo to Render
+python -m src.prediction_ranges
+python -m src.signals
+python -m src.backtesting
+```
+
+### Run tests
+
+```bash
+python -m pytest tests -q
+```
+
+For a faster recent-regression check:
+
+```bash
+python -m pytest tests/test_phase20_true_historical_ml_replay.py tests/test_phase21_unified_risk_command_center.py tests/test_phase22_prediction_edge_improvement.py tests/test_phase23_multiasset_workflow.py tests/test_phase24_premium_ui.py -q
 ```
 
 ---
 
-## 📚 Documentation
+## Research Methodology
 
-| Document | Location |
-|---|---|
-| Installation Guide | `report/installation_guide.md` |
-| User Manual | `report/user_manual.md` |
-| Developer Guide | `report/developer_guide.md` |
-| Architecture Diagram | `report/architecture.png` |
-| Project Report (PDF) | `report/project_report.pdf` |
+The project is built around a conservative research workflow:
 
----
+1. Collect and align multi-asset market data.
+2. Engineer lagged, rolling, technical, calendar, and cross-asset features.
+3. Train and evaluate forecasting models using time-series-aware validation.
+4. Convert forecasts into research-only signal candidates.
+5. Track pending and matured paper signals.
+6. Apply risk checks, cost sensitivity, drawdown stress, and exposure limits.
+7. Compare strategies against simple baselines.
+8. Reject or downgrade signals when benchmark dominance, calibration, or data-quality checks fail.
 
-## 🛠️ Tech Stack
-
-**Data:** pandas, numpy, yfinance, fredapi, pandas-datareader  
-**ML:** scikit-learn, xgboost, lightgbm, catboost  
-**DL:** TensorFlow/Keras, PyTorch  
-**Technical Analysis:** ta, pandas-ta, mplfinance  
-**Visualization:** matplotlib, seaborn, plotly  
-**Dashboard:** Streamlit  
-**Optimization:** Optuna  
-**Explainability:** SHAP, LIME  
-**Deployment:** Docker, Streamlit Cloud  
+This workflow is meant to reduce common mistakes in financial ML projects, especially leakage, overfitting, unrealistic backtests, and overconfident trading claims.
 
 ---
 
-## Research Status
+## Current Research Status
+
+The platform is currently a research and paper-tracking system. It is not a live trading system.
+
+Important design decisions:
+
+* Real-money recommendations are blocked by default.
+* Signals are treated as research candidates, not trading advice.
+* Probability estimates are treated cautiously unless calibration evidence is strong.
+* Benchmark comparison is required before claiming strategy strength.
+* Missing data, unreliable outputs, or benchmark underperformance reduce confidence.
+
+---
+
+## What This Project Does Not Do
+
+This project does not:
+
+* Provide financial advice.
+* Promise profitable outcomes.
+* Execute real-money orders.
+* Claim that forecasting accuracy alone is enough for a market strategy.
+* Hide weak results or failed benchmarks.
 
 This repository is maintained as a research and paper-evidence system. Real-capital use remains blocked by the platform's validation and risk gates.
 
 ---
 
-## 📄 License
+## Testing Philosophy
 
-This project is licensed under the MIT License — see [LICENSE](LICENSE) for details.
+Financial ML projects can look impressive while still being wrong. This project uses tests and quality gates to reduce that risk.
+
+Examples of checks included in the workflow:
+
+* Time-series leakage checks.
+* Return sanity checks.
+* Exposure-cap enforcement.
+* Benchmark comparison checks.
+* Data-quality warnings.
+* Research-output consistency checks.
+* Missing-artifact handling.
+* User-facing wording checks.
 
 ---
 
-## 🙏 Acknowledgements
+## Public Repository Policy
 
-- [Yahoo Finance (yfinance)](https://github.com/ranaroussi/yfinance)
-- [Federal Reserve Economic Data (FRED)](https://fred.stlouisfed.org)
-- [TA-Lib Technical Analysis](https://github.com/bukosabino/ta)
-- [Streamlit](https://streamlit.io)
-- [XGBoost](https://xgboost.readthedocs.io)
-- [TensorFlow](https://tensorflow.org)
+The public repository should avoid secrets, local environments, generated artifacts, and cache files.
+
+Do not commit:
+
+```text
+venv/
+.env
+.streamlit/secrets.toml
+__pycache__/
+.pytest_cache/
+data/raw/
+data/processed/
+models/
+artifacts/
+*.zip
+*.log
+```
+
+The repository is designed to keep source code, configuration, tests, and documentation public while excluding heavy local research outputs unless a deployment-specific demo snapshot is intentionally prepared.
+
+---
+
+## Future Improvements
+
+Planned improvements include:
+
+* Deployment hardening for public demo environments.
+* Graceful demo mode when data, models, or artifacts are missing.
+* Cleaner historical replay with true saved model snapshots.
+* Stronger out-of-sample evaluation.
+* More robust transaction-cost modeling.
+* Better regime-aware signal filtering.
+* Improved dashboard explanations for non-technical users.
+* Additional tests for edge cases and data-quality failures.
+
+---
+
+## Author
+
+**Poojan Bhardwaj**
+B.Tech in Mathematics and Computing
+National Institute of Technology, Kurukshetra
+Academic Year: 2024–2028
+
+GitHub: [poojanbhardwaj](https://github.com/poojanbhardwaj)
+LinkedIn: [Poojan Bhardwaj](https://www.linkedin.com/in/poojan-bhardwaj-22b36b38a/)
+
+---
+
+## License
+
+No formal license file is included by default. Add a `LICENSE` file before publishing a specific open-source license.
