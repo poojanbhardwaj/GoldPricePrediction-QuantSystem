@@ -4,6 +4,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -42,6 +43,7 @@ from src.app_context import (
 from src.explanation_glossary import glossary_entries
 from src.workflow_guide import run_multiasset_workflow_audit
 from src.research_orchestrator import (
+    ADVANCED_DIAGNOSTIC_PAGES,
     PHASE26_PRODUCT_EXPERIENCE,
     PRIMARY_USER_PAGES,
     build_navigation_audit,
@@ -51,9 +53,27 @@ from src.research_orchestrator import (
     save_product_experience_artifacts,
 )
 from src.user_plan_generator import (
+    build_high_risk_explanations,
+    build_monitoring_plan,
     generate_all_asset_plans,
     generate_portfolio_plan,
     rank_asset_plans,
+    save_premium_product_artifacts,
+)
+from src.cost_aware_plan import (
+    COST_DISCLAIMER,
+    compare_active_vs_passive_after_costs,
+    default_cost_assumptions,
+    generate_cost_aware_asset_plan,
+)
+from src.final_user_dashboard import (
+    PHASE29_FINAL_USER_EXPERIENCE,
+    build_all_asset_prediction_snapshot,
+    generate_final_user_plan,
+    get_latest_asset_prices,
+    resolve_horizon_estimates,
+    run_full_user_research,
+    set_plan_navigation_state,
 )
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
@@ -127,15 +147,36 @@ from src.prediction_edge_improvement import (
 )
 from src.ui_components import (
     inject_premium_css,
+    render_asset_plan_card,
+    render_active_vs_passive_card,
+    render_asset_price_card,
+    render_beginner_explanation_box,
     render_blocked_capital_banner,
+    render_cost_assumption_inputs,
+    render_cost_summary_card,
+    render_disclaimer_banner,
     render_download_buttons,
+    render_empty_state,
+    render_glass_container,
     render_glossary_expander,
+    render_hero_section,
     render_metric_grid,
+    render_market_snapshot_grid,
+    render_monitoring_card,
+    render_navigation_card,
+    render_opportunity_card,
     render_pipeline_stepper,
+    render_prediction_snapshot_card,
+    render_premium_header,
     render_research_disclaimer,
+    render_risk_explanation_card,
+    render_run_research_panel,
     render_safe_table,
     render_section_header,
     render_status_card,
+    render_status_tabs,
+    render_score_explainer_card,
+    render_simple_plan_card,
 )
 from src.artifact_store import (
     build_input_source_table,
@@ -231,6 +272,49 @@ def _load_phase26_table(artifact_name: str) -> pd.DataFrame:
     return table if isinstance(table, pd.DataFrame) else pd.DataFrame()
 
 
+def _load_phase29_table(filename: str) -> pd.DataFrame:
+    path = Path(__file__).resolve().parent / "artifacts" / "latest" / PHASE29_FINAL_USER_EXPERIENCE / filename
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def _latest_user_price_snapshot() -> pd.DataFrame:
+    return get_latest_asset_prices(_load_cached_market_history())
+
+
+def _phase29_placeholder_snapshot(prices: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(prices, pd.DataFrame) or prices.empty:
+        return pd.DataFrame()
+    frame = prices.copy()
+    defaults = {
+        "BestHorizon": 0, "PredictedPrice": np.nan, "PredictedMovePct": np.nan,
+        "Status": "Not Enough Evidence", "OpportunityScore": 0.0, "OpportunityGrade": "F",
+        "RiskLabel": "Not Enough Evidence", "CostVerdict": "MissingEstimate",
+        "PassiveBenchmarkName": "Passive benchmark pending", "SimplePlan": "Run Full Research to build a complete paper-research plan.",
+    }
+    for column, value in defaults.items():
+        frame[column] = value
+    return frame
+
+
+def _navigate_primary(destination: str) -> None:
+    """Switch primary product pages from a CTA callback and rerun immediately."""
+    if destination in set(PRIMARY_USER_PAGES) | {"Cost-Aware Plan", "Paper Research Journey"}:
+        st.session_state.primary_product_navigation = destination
+        st.rerun()
+
+
+def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = None) -> None:
+    """Preserve plan context while moving between primary user pages."""
+    set_plan_navigation_state(st.session_state, asset, destination, horizon)
+    st.rerun()
+
+
 def _status_card_style(status: str) -> str:
     return {
         "Track": "positive",
@@ -245,9 +329,14 @@ def _status_card_style(status: str) -> str:
 
 def _render_asset_plan_cards(plans: pd.DataFrame, *, show_advanced: bool = False) -> None:
     if not isinstance(plans, pd.DataFrame) or plans.empty:
-        st.warning("No asset plans are available. Generate a research plan first.")
+        render_empty_state(
+            "No asset plans yet",
+            "Generate a research plan to turn the latest saved evidence into conservative, plain-language cards.",
+        )
         return
     for _, plan in plans.iterrows():
+        render_asset_plan_card(plan.to_dict(), show_advanced=show_advanced)
+        continue
         with st.container(border=True):
             left, right = st.columns([0.72, 0.28])
             with left:
@@ -273,6 +362,88 @@ def _render_asset_plan_cards(plans: pd.DataFrame, *, show_advanced: bool = False
                 with st.expander("Advanced evidence", expanded=False):
                     st.write(plan.get("TechnicalEvidenceSummary", "No technical summary is available."))
                     st.caption(f"Sources: {plan.get('AdvancedEvidenceReferences', 'No saved references')}")
+
+
+def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
+    if not isinstance(snapshot, pd.DataFrame) or snapshot.empty:
+        render_empty_state("No final snapshot", "Use Run Full Research to combine prices, saved estimates, risk, benchmarks, and costs.")
+        return
+
+    render_section_header(
+        "Current multi-asset snapshot",
+        "Numbers use the latest available project dataset until an explicit refresh is requested.",
+    )
+    render_market_snapshot_grid(
+        snapshot,
+        on_view_plan=lambda asset, horizon: _navigate_to_plan(asset, "Asset Plans", horizon),
+    )
+    advanced_mode = st.toggle("Advanced mode", value=False, key="phase29_advanced_mode")
+
+    assets = snapshot["Asset"].astype(str).tolist()
+    default_asset = st.session_state.get("phase29_selected_plan_asset", DEFAULT_ASSET)
+    selected_asset_index = assets.index(default_asset) if default_asset in assets else 0
+    view_asset = st.selectbox("View plan", assets, index=selected_asset_index, key="phase29_main_plan_asset")
+    st.session_state.phase29_selected_plan_asset = view_asset
+    selected = snapshot[snapshot["Asset"].astype(str).eq(view_asset)].iloc[0].to_dict()
+    selected_a, selected_b = st.columns(2)
+    with selected_a:
+        render_prediction_snapshot_card(selected)
+        render_cost_summary_card(selected)
+    with selected_b:
+        render_active_vs_passive_card(selected)
+        render_score_explainer_card(selected)
+    render_simple_plan_card(selected)
+    if advanced_mode:
+        with st.expander("Advanced snapshot fields", expanded=False):
+            st.dataframe(pd.DataFrame([selected]), width="stretch", hide_index=True)
+
+    render_section_header("Compare all assets", "Filter and sort the same snapshot without changing its underlying evidence.")
+    compare_a, compare_b, compare_c, compare_d = st.columns(4)
+    with compare_a:
+        status_values = ["All"] + sorted(snapshot["Status"].dropna().astype(str).unique().tolist())
+        status_filter = st.selectbox("Status", status_values, key="phase29_status_filter")
+    with compare_b:
+        risk_values = ["All"] + sorted(snapshot.get("RiskLabel", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
+        risk_filter = st.selectbox("Risk", risk_values, key="phase29_risk_filter")
+    with compare_c:
+        freshness_values = ["All"] + sorted(snapshot["DataFreshness"].dropna().astype(str).unique().tolist())
+        freshness_filter = st.selectbox("Freshness", freshness_values, key="phase29_freshness_filter")
+    with compare_d:
+        snapshot_sort = st.selectbox(
+            "Sort", ["OpportunityScore", "PredictedMovePct", "CostVerdict", "ActiveMinusPassiveNetPct"],
+            key="phase29_snapshot_sort",
+        )
+    view = snapshot.copy()
+    if status_filter != "All":
+        view = view[view["Status"].astype(str).eq(status_filter)]
+    if risk_filter != "All" and "RiskLabel" in view:
+        view = view[view["RiskLabel"].astype(str).eq(risk_filter)]
+    if freshness_filter != "All":
+        view = view[view["DataFreshness"].astype(str).eq(freshness_filter)]
+    view = view.sort_values(snapshot_sort, ascending=False, na_position="last")
+    columns = [column for column in (
+        "Asset", "LatestPrice", "LatestPriceDate", "Status", "OpportunityScore", "BestHorizon",
+        "PredictedPrice", "PredictedMovePct", "CostDragPct", "BreakEvenReturnPct",
+        "NetActiveEstimatePct", "NetPassiveEstimatePct", "ActiveMinusPassiveNetPct",
+        "CostVerdict", "PassiveBenchmarkName", "TrustScore",
+    ) if column in view.columns]
+    st.dataframe(view[columns], width="stretch", hide_index=True)
+
+    ranked = snapshot.sort_values("OpportunityScore", ascending=False, na_position="last")
+    cost_blocked = snapshot[snapshot.get("CostVerdict", pd.Series(dtype=str)).eq("CostsTooHighForSignal")].head(3)
+    gaps = pd.to_numeric(snapshot.get("ActiveMinusPassiveNetPct", pd.Series(np.nan, index=snapshot.index)), errors="coerce")
+    passive_stronger = snapshot[gaps.lt(0)].head(3)
+    insight_a, insight_b, insight_c = st.columns(3)
+    with insight_a:
+        render_beginner_explanation_box("Top 3 closest to track", "; ".join(ranked.head(3)["Asset"].astype(str)) or "No ranked assets yet.")
+    with insight_b:
+        render_beginner_explanation_box("Top cost-blocked ideas", "; ".join(cost_blocked["Asset"].astype(str)) if not cost_blocked.empty else "No complete cost-blocked estimate yet.")
+    with insight_c:
+        render_beginner_explanation_box("Passive benchmark stronger", "; ".join(passive_stronger["Asset"].astype(str)) if not passive_stronger.empty else "No complete passive comparison yet.")
+    render_download_buttons({
+        "Final snapshot": (snapshot, "phase29_all_asset_prediction_snapshot.csv"),
+        "Cost-aware plans": (snapshot, "phase29_cost_aware_asset_plans.csv"),
+    })
 
 
 @st.cache_data(show_spinner=False)
@@ -395,6 +566,10 @@ if "phase26_asset_plans" not in st.session_state:
     st.session_state.phase26_asset_plans = None
 if "phase26_portfolio_plan" not in st.session_state:
     st.session_state.phase26_portfolio_plan = None
+if "phase29_user_report" not in st.session_state:
+    st.session_state.phase29_user_report = None
+if "phase29_selected_plan_asset" not in st.session_state:
+    st.session_state.phase29_selected_plan_asset = DEFAULT_ASSET
 if "directional_results" not in st.session_state:
     st.session_state.directional_results = None
 if "directional_asset" not in st.session_state:
@@ -583,16 +758,59 @@ NAVIGATION_GROUPS = {
     ],
 }
 
+# Primary users see plain product language. Internal route labels remain unchanged below.
+ADVANCED_FRIENDLY_ROUTES = dict(ADVANCED_DIAGNOSTIC_PAGES)
+NAVIGATION_GROUPS = {
+    "Data & Features": [
+        "Overview Command Center", "Guided Research Workflow", "Dataset Explorer",
+        "Technical Indicators", "Feature Intelligence", "Evidence Store", "About Project",
+    ],
+    "Forecasting & Models": [
+        "Train Models", "Compare Models", "Prediction", "Directional Models",
+        "Direct Forecast Models", "Direct Horizon Scanner", "30-Day Forecast", "Model Edge Benchmark Lab",
+    ],
+    "Signals & Plans": [
+        "Signal Engine", "Signal Research Scanner", "Signal Policy Sensitivity",
+        "Signal Policy & Edge Repair Lab", "Regime-Aware Meta Signal", "Candidate Deep Diagnostics",
+        "Risk-Controlled Upgrade", "Actionable Research Plan", "Daily Research Control Center",
+    ],
+    "Risk & Regime": [
+        "Risk & Warning Intelligence", "Dynamic Risk Sizing", "Market Regime Intelligence",
+        "Portfolio & Capital Simulator", "Unified Risk Command Center",
+    ],
+    "Backtesting & Replay": [
+        "Backtesting", "Strategy Benchmark Arena", "Historical Model Replay",
+        "Walk-Forward ML Replay", "Walk-Forward Validation",
+    ],
+    "Evidence & Quality Gates": [
+        "Research Validation", "Multi-Asset Matrix", "Meta Decision Audit", "Meta Reliability Grading",
+        "Evidence Expansion", "Evidence Quality Diagnostics", "Probability Calibration",
+        "Forward Paper Evidence", "True Raw Trade Logs", "Raw Trade Log Exporter", "Trade Evidence Ledger",
+    ],
+}
+
+LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
+PRIMARY_PRODUCT_PAGES = [
+    "Market Research Assistant",
+    "Asset Plans",
+    "Forecast Explorer",
+    "Cost-Aware Plan",
+    "Portfolio Summary",
+    "Paper Research Journey",
+    "About / Methodology",
+]
+
 experience_page = st.sidebar.radio(
     "Navigate",
-    list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"],
+    PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"],
     key="primary_product_navigation",
 )
 is_advanced_diagnostic = experience_page == "Advanced Diagnostics"
 if is_advanced_diagnostic:
     navigation_group = st.sidebar.selectbox("Diagnostic area", list(NAVIGATION_GROUPS), key="navigation_group")
     group_pages = NAVIGATION_GROUPS[navigation_group]
-    page_label = group_pages[0] if len(group_pages) == 1 else st.sidebar.selectbox("Diagnostic page", group_pages, key=f"page_{navigation_group}")
+    friendly_page = group_pages[0] if len(group_pages) == 1 else st.sidebar.selectbox("Diagnostic page", group_pages, key=f"page_{navigation_group}")
+    page_label = ADVANCED_FRIENDLY_ROUTES.get(friendly_page, friendly_page)
 else:
     page_label = experience_page
 
@@ -639,9 +857,73 @@ if is_advanced_diagnostic:
 # ════════════════════════════════════════════════════════════════
 
 if page == "Market Research Assistant":
-    st.markdown('<p class="main-header">Market Research Assistant</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Select assets and horizons. The app checks available research evidence and creates a simple plan.</p>', unsafe_allow_html=True)
-    render_research_disclaimer()
+    render_hero_section(
+        "Multi-Asset Research Intelligence",
+        "Track market ideas with forecasts, costs, risk, and benchmarks in one place",
+        "Run the research engine, compare active estimates against passive benchmarks, and get a simple paper-research plan.",
+    )
+    render_disclaimer_banner()
+    render_blocked_capital_banner()
+
+    hero_a, hero_b, hero_c, hero_d = st.columns(4)
+    with hero_a:
+        run_full_clicked = st.button("Run Full Research", type="primary", width="stretch", key="phase29_run_full")
+    with hero_b:
+        refresh_market_clicked = st.button("Refresh Market Data", width="stretch", key="phase29_refresh_market")
+    with hero_c:
+        st.button(
+            "View Cost-Aware Plan", width="stretch", key="phase29_open_cost_plan",
+            on_click=_navigate_to_plan,
+            args=(selected_asset, "Cost-Aware Plan", int(selected_horizon)),
+        )
+    with hero_d:
+        st.button(
+            "Open Paper Research Journey", width="stretch", key="phase29_open_paper_journey",
+            on_click=_navigate_to_plan,
+            args=(selected_asset, "Paper Research Journey", int(selected_horizon)),
+        )
+
+    render_run_research_panel()
+    if run_full_clicked or refresh_market_clicked:
+        with st.status("Building the final research snapshot...", expanded=True) as run_status:
+            for step in (
+                "Loading latest prices", "Checking saved forecasts", "Checking risk",
+                "Comparing passive benchmarks", "Estimating costs", "Building final plans",
+            ):
+                st.write(step)
+            try:
+                phase29_report = run_full_user_research(
+                    selected_assets=get_supported_assets(), selected_horizons=get_available_horizons(),
+                    amount=10000, cost_assumptions=default_cost_assumptions(),
+                    refresh=bool(refresh_market_clicked),
+                )
+                st.session_state.phase29_user_report = phase29_report
+                st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
+                st.session_state.phase26_asset_plans = phase29_report.get("AssetPlans")
+                _latest_user_price_snapshot.clear()
+                for warning in phase29_report.get("Warnings", []):
+                    st.warning(warning)
+                st.write("Saving snapshot")
+                run_status.update(label="Final research snapshot ready", state="complete", expanded=False)
+            except Exception as exc:
+                st.warning(f"Some research evidence could not be combined: {exc}")
+                run_status.update(label="Completed with missing evidence", state="error", expanded=True)
+
+    phase29_report = st.session_state.get("phase29_user_report")
+    phase29_snapshot = (
+        phase29_report.get("AllAssetPredictionSnapshot", pd.DataFrame())
+        if isinstance(phase29_report, dict)
+        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+    )
+    if not isinstance(phase29_snapshot, pd.DataFrame) or phase29_snapshot.empty:
+        phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+    _render_phase29_snapshot(phase29_snapshot)
+    hero_generate_clicked = False
+
+    render_glass_container(
+        "Research controls",
+        "Choose a focus or keep the full multi-asset view. The assistant reads saved evidence and does not rerun expensive models on page load.",
+    )
 
     assistant_a, assistant_b, assistant_c = st.columns(3)
     with assistant_a:
@@ -662,7 +944,7 @@ if page == "Market Research Assistant":
     with action_b:
         refresh_snapshot_clicked = st.button("Refresh Research Snapshot", width="stretch")
 
-    if generate_plan_clicked or refresh_snapshot_clicked:
+    if hero_generate_clicked or generate_plan_clicked or refresh_snapshot_clicked:
         with st.spinner("Reviewing saved research evidence..."):
             phase26_snapshot = run_research_engine(
                 selected_assets=get_supported_assets(),
@@ -672,6 +954,11 @@ if page == "Market Research Assistant":
             phase26_plans = generate_all_asset_plans(phase26_snapshot)
             phase26_portfolio = generate_portfolio_plan(phase26_plans)
             save_product_experience_artifacts(phase26_snapshot, phase26_plans, phase26_portfolio)
+            save_premium_product_artifacts(
+                phase26_plans,
+                phase26_portfolio,
+                app_source=Path(__file__).read_text(encoding="utf-8"),
+            )
             st.session_state.phase26_research_snapshot = phase26_snapshot
             st.session_state.phase26_asset_plans = phase26_plans
             st.session_state.phase26_portfolio_plan = phase26_portfolio
@@ -684,8 +971,13 @@ if page == "Market Research Assistant":
         phase26_plans = _load_phase26_table("phase26_asset_plans")
 
     if phase26_plans.empty:
-        st.warning("No research plan has been generated yet. Use Generate Research Plan to review available saved evidence.")
+        render_empty_state(
+            "No research plan generated yet",
+            "Use Generate Research Plan to review the latest saved evidence. Missing evidence will stay visible rather than being treated as neutral.",
+        )
     else:
+        phase26_plans = rank_asset_plans(phase26_plans)
+        phase26_portfolio = generate_portfolio_plan(phase26_plans)
         display_plans = phase26_plans.copy()
         if assistant_asset != "All assets":
             display_plans = display_plans[display_plans["Asset"].astype(str).eq(assistant_asset)]
@@ -695,20 +987,60 @@ if page == "Market Research Assistant":
         display_plans = rank_asset_plans(display_plans)
 
         counts = display_plans["Status"].value_counts()
-        track_rows = display_plans[display_plans["Status"].eq("Track")]
-        best_track = f"{track_rows.iloc[0]['Asset']} {int(track_rows.iloc[0]['Horizon'])}D" if not track_rows.empty else "None"
-        render_section_header("Portfolio View", "Simple statuses summarize the selected research context.")
+        closest = display_plans.iloc[0] if not display_plans.empty else pd.Series(dtype=object)
+        closest_label = f"{closest.get('Asset', 'None')} {int(closest.get('Horizon', 0))}D" if not closest.empty else "None"
+        render_section_header("Research snapshot", "Opportunity scores rank research closeness, not investment attractiveness.")
         render_metric_grid(
             [
-                {"title": "Best to Track", "value": best_track, "subtitle": f"{int(counts.get('Track', 0))} track plan(s)", "status": "positive" if not track_rows.empty else "neutral"},
+                {"title": "Closest to Track", "value": closest_label, "subtitle": f"Score {float(closest.get('OpportunityScore', 0)):.0f}/100 · status stays {closest.get('Status', 'Unknown')}", "status": _status_card_style(str(closest.get("Status", "")))},
                 {"title": "Watchlist", "value": int(counts.get("Watch", 0)), "subtitle": "Interesting, but evidence remains limited", "status": "info"},
-                {"title": "Wait", "value": int(counts.get("Wait", 0) + counts.get("Not Enough Evidence", 0)), "subtitle": "No clear reason to prioritize now", "status": "neutral"},
-                {"title": "Avoid / High Risk", "value": int(counts.get("Avoid", 0) + counts.get("High Risk", 0)), "subtitle": "Risk or weak evidence dominates", "status": "critical" if counts.get("Avoid", 0) + counts.get("High Risk", 0) else "neutral"},
+                {"title": "High Risk", "value": int(counts.get("Avoid", 0) + counts.get("High Risk", 0)), "subtitle": "Risk evidence dominates opportunity evidence", "status": "critical" if counts.get("Avoid", 0) + counts.get("High Risk", 0) else "neutral"},
                 {"title": "Data Issues", "value": int(counts.get("Data Issue", 0)), "subtitle": "Repair data before interpretation", "status": "warning" if counts.get("Data Issue", 0) else "neutral"},
             ]
         )
-        render_section_header("Asset Plans", "Each plan explains why the status was assigned and what would change it.")
-        _render_asset_plan_cards(display_plans, show_advanced=show_advanced_evidence)
+
+        portfolio_row = phase26_portfolio.iloc[0]
+        render_section_header("Portfolio condition", "A plain-language reading of the full research set.")
+        condition_a, condition_b = st.columns(2)
+        with condition_a:
+            render_risk_explanation_card(
+                str(portfolio_row.get("OverallResearchCondition", "Evidence constrained")),
+                str(portfolio_row.get("WhySystemIsCautious", "Risk and evidence limits keep the system cautious.")),
+                f"Main risk theme: {portfolio_row.get('MainRiskTheme', portfolio_row.get('MainMarketRisk', 'Unknown'))}",
+            )
+        with condition_b:
+            render_monitoring_card(
+                f"Best available opportunity: {portfolio_row.get('ClosestToTrack', closest_label)}",
+                str(portfolio_row.get("WhatUserShouldMonitorNext", "Review forward outcomes and risk warnings.")),
+                str(portfolio_row.get("NextReviewTrigger", "After the next saved evidence refresh.")),
+            )
+
+        risk_share = display_plans["Status"].isin(["High Risk", "Avoid"]).mean() if not display_plans.empty else 0.0
+        if risk_share >= 0.5:
+            render_section_header("Why are many assets marked High Risk?")
+            render_risk_explanation_card(
+                "The system is intentionally conservative",
+                str(display_plans.iloc[0].get("WhyEverythingIsHighRisk", "Risk warnings are stronger than opportunity signals.")),
+                "A forecast alone is not enough: benchmark support, regime stability, data freshness, and repeatable evidence must also improve.",
+            )
+
+        render_section_header(
+            "Closest to becoming trackable",
+            "These are the least blocked research combinations. Their underlying statuses are not upgraded by the ranking.",
+        )
+        opportunity_rows = display_plans.head(6)
+        for row_start in range(0, len(opportunity_rows), 2):
+            opportunity_columns = st.columns(2)
+            for column, (_, opportunity) in zip(opportunity_columns, opportunity_rows.iloc[row_start:row_start + 2].iterrows()):
+                with column:
+                    render_opportunity_card(opportunity.to_dict())
+
+        with st.expander("What changed since the previous snapshot?", expanded=False):
+            st.info("No earlier product snapshot is loaded for comparison. A later refresh can be compared without changing research calculations.")
+
+        show_more_plans = st.checkbox("Show more asset plan cards", value=False, key="phase27_show_more_plans")
+        render_section_header("Asset plans", "Each card explains the blocker, improvement needed, and next review trigger.")
+        _render_asset_plan_cards(display_plans if show_more_plans else display_plans.head(6), show_advanced=show_advanced_evidence)
         if show_advanced_evidence:
             with st.expander("Raw evidence snapshot", expanded=False):
                 if phase26_snapshot.empty:
@@ -717,10 +1049,296 @@ if page == "Market Research Assistant":
                     st.dataframe(phase26_snapshot.head(1000), width="stretch", hide_index=True)
 
 
+elif page == "Paper Research Journey":
+
+
+    st.markdown("<div class='premium-pill'>Paper Research Journey</div>", unsafe_allow_html=True)
+
+
+    st.markdown("# Build trust through paper research")
+
+
+    st.caption("Track ideas safely, compare them against passive benchmarks, and learn when the system is useful â€” without real-money decisions.")
+
+
+    st.info("This is a research assistant, not financial advice. It does not execute trades or approve real-money decisions.")
+
+
+
+    try:
+
+
+        from src.paper_research_journey import (
+
+
+            build_paper_research_journey,
+
+
+            create_paper_research_plan,
+
+
+            generate_passive_benchmark_guides,
+
+
+            save_phase28_artifacts,
+
+
+        )
+
+
+        from src.user_plan_generator import generate_all_asset_plans
+
+
+    except Exception as exc:
+
+
+        st.error(f"Paper Research Journey is unavailable: {exc}")
+
+
+        st.stop()
+
+
+
+    try:
+
+
+        plans = st.session_state.get("phase26_asset_plans")
+        if not isinstance(plans, pd.DataFrame):
+            plans = _load_phase26_table("phase26_asset_plans")
+        if not isinstance(plans, pd.DataFrame) or plans.empty:
+            plans = generate_all_asset_plans(pd.DataFrame())
+
+
+        journey = build_paper_research_journey(plans)
+
+
+        save_phase28_artifacts(journey)
+
+
+    except Exception as exc:
+
+
+        st.warning(f"Using limited paper research view because latest plan artifacts were incomplete: {exc}")
+
+
+        journey = build_paper_research_journey([])
+
+
+
+    trust = journey.get("TrustScorecard", {})
+
+
+    c1, c2, c3, c4 = st.columns(4)
+
+
+    c1.metric("Trust score", trust.get("TrustScore", 10))
+
+
+    c2.metric("Trust label", trust.get("TrustLabel", "New"))
+
+
+    c3.metric("Completed paper plans", trust.get("CompletedPaperPlans", 0))
+
+
+    c4.metric("Benchmark wins", trust.get("BenchmarkBeatenCount", 0))
+
+
+
+    st.markdown("## Why use this if passive benchmarks often win?")
+
+
+    st.write("Passive benchmarks are hard to beat. The value of this platform is not to force active ideas; it is to structure paper tests, compare every idea against a benchmark, and avoid trusting weak forecasts blindly.")
+
+
+
+    st.markdown("## Closest candidates to track in paper research")
+
+
+    candidates = journey.get("Candidates", [])
+
+
+    if not candidates:
+
+
+        st.warning("No candidates are available yet. Generate an asset plan first, then return here.")
+
+
+    else:
+
+
+        for row in candidates[:8]:
+
+
+            with st.container(border=True):
+
+
+                top = st.columns([1.2, 0.8, 0.8, 1.2])
+
+
+                top[0].markdown(f"### {row.get('Asset')} Â· {row.get('Horizon')}")
+
+
+                top[1].metric("Opportunity", row.get("OpportunityScore", 0))
+
+
+                top[2].write(f"**Status:** {row.get('Status', 'Not Enough Evidence')}")
+
+
+                top[3].write(f"**Recheck:** {row.get('RecheckPriority', 'Medium')}")
+
+
+                st.write(f"**What is blocking it:** {row.get('MainBlocker', 'Evidence is not strong enough yet.')}")
+
+
+                st.write(f"**What must improve:** {row.get('WhatMustImprove', 'Benchmark evidence and risk conditions must improve.')}")
+
+
+                st.write(f"**What to monitor next:** {row.get('WhatUserShouldMonitorNext', 'Monitor risk warnings, data freshness, and benchmark gap.')}")
+
+
+                st.write(f"**Passive benchmark:** {row.get('PassiveBenchmarkName', 'Passive benchmark reference')}")
+
+
+                st.caption(row.get("BenchmarkWarning", "Benchmark comparison is research-only and does not approve real-money decisions."))
+
+
+
+    st.markdown("## Start a simulated paper research plan")
+
+
+    assets = sorted({row.get("Asset", "Gold") for row in candidates}) or ["Gold", "Silver", "Crude Oil", "Bitcoin", "S&P 500", "Gold ETF"]
+
+
+    selected_asset = st.selectbox("Asset", assets, key="phase28_asset")
+
+
+    matching = [row for row in candidates if row.get("Asset") == selected_asset]
+
+
+    horizons = sorted({row.get("Horizon", "30D") for row in matching}) or ["1D", "5D", "10D", "20D", "30D"]
+
+
+    selected_horizon = st.selectbox("Horizon", horizons, key="phase28_horizon")
+
+
+    amount = st.number_input("Simulated amount", min_value=0.0, value=10000.0, step=1000.0, key="phase28_amount")
+
+
+    notes = st.text_area("Research notes", value="", key="phase28_notes")
+
+    with st.expander("Cost-aware paper assumptions", expanded=False):
+        st.info(COST_DISCLAIMER)
+        paper_cost_assumptions = render_cost_assumption_inputs(
+            default_cost_assumptions(selected_asset), key_prefix="phase28_cost",
+        )
+
+
+    if st.button("Create paper research plan", key="phase28_create_plan"):
+
+
+        base = next((row for row in candidates if row.get("Asset") == selected_asset and row.get("Horizon") == selected_horizon), {})
+
+
+        plan = create_paper_research_plan(selected_asset, selected_horizon, base, simulated_amount=amount, notes=notes)
+        cost_enriched = generate_cost_aware_asset_plan(
+            {**base, "Asset": selected_asset, "Horizon": selected_horizon},
+            amount=amount, cost_assumptions=paper_cost_assumptions,
+        )
+        for field in (
+            "EstimatedRoundTripCost", "CostDragPct", "BreakEvenReturnPct", "GrossActiveEstimatePct",
+            "NetActiveEstimatePct", "GrossPassiveEstimatePct", "NetPassiveEstimatePct",
+            "ActiveMinusPassiveNetPct", "CostVerdict", "CostWarning", "ActiveVsPassiveLesson",
+        ):
+            plan[field] = cost_enriched.get(field)
+        plan["CostAssumptions"] = paper_cost_assumptions
+        plan["TrustCostNote"] = "Trust should improve only when repeated net outcomes survive costs and compare well with the passive benchmark."
+
+
+        st.session_state.setdefault("phase28_active_paper_plans", []).append(plan)
+
+
+        st.success("Paper research plan created for simulated tracking.")
+
+
+        st.json(plan)
+
+
+
+    active = st.session_state.get("phase28_active_paper_plans", [])
+
+
+    st.markdown("## Active paper research plans")
+
+
+    if not active:
+
+
+        st.info("No active paper research plans in this session yet. Create one above and review it after the horizon matures.")
+
+
+    else:
+
+
+        for plan in active:
+
+
+            with st.expander(f"{plan.get('Asset')} Â· {plan.get('Horizon')} Â· {plan.get('PlanId')}"):
+
+
+                st.write(f"**Status at start:** {plan.get('StatusAtStart')}")
+
+
+                st.write(f"**Benchmark:** {plan.get('BenchmarkToCompare')}")
+
+
+                st.write(f"**Cost verdict:** {plan.get('CostVerdict', 'MissingEstimate')}")
+
+
+                st.write(f"**Break-even return:** {plan.get('BreakEvenReturnPct', 'Not available')}%")
+
+
+                st.write(f"**What to monitor:** {plan.get('WhatUserShouldMonitorNext')}")
+
+
+                st.write(f"**Invalidation condition:** {plan.get('InvalidationCondition')}")
+
+
+                st.caption(plan.get("BenchmarkWarning"))
+
+
+
+    st.markdown("## What is the passive benchmark?")
+
+
+    guides = generate_passive_benchmark_guides()
+
+
+    for guide in guides:
+
+
+        with st.expander(f"{guide['Asset']} â€” {guide['PassiveBenchmarkName']}"):
+
+
+            st.write(guide["Explanation"])
+
+
+            st.write(f"**How to follow in research mode:** {guide['HowToFollow']}")
+
+
+            st.write(f"**What to compare:** {guide['WhatToCompare']}")
+
+
+            st.warning(guide["Warning"])
+
+
+
 elif page == "Asset Plans":
-    st.markdown('<p class="main-header">Asset Plans</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">The strongest current research plan for each configured asset</p>', unsafe_allow_html=True)
-    render_research_disclaimer()
+    render_premium_header(
+        "Asset Plans",
+        "Compare every configured asset and horizon through conservative, plain-language research cards.",
+        "Opportunity ranking",
+    )
+    render_disclaimer_banner()
     asset_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = _load_phase26_table("phase26_asset_plans")
@@ -728,27 +1346,103 @@ elif page == "Asset Plans":
     if not isinstance(portfolio_plan, pd.DataFrame):
         portfolio_plan = _load_phase26_table("phase26_portfolio_plan")
     if asset_plans.empty:
-        st.warning("No asset plans are available. Open Market Research Assistant and generate a plan first.")
+        render_empty_state(
+            "No asset plans available",
+            "Open Market Research Assistant and generate a plan from the latest saved evidence first.",
+        )
     else:
-        asset_focus = st.selectbox("Asset focus", ["All assets"] + get_supported_assets(), key="phase26_asset_plan_focus")
         ranked_plans = rank_asset_plans(asset_plans)
-        best_by_asset = ranked_plans.sort_values("PlanRank").groupby("Asset", as_index=False).head(1)
+        portfolio_plan = generate_portfolio_plan(ranked_plans)
+        filter_choice = render_status_tabs(
+            ["All", "Closest to Track", "Watch", "Wait", "High Risk", "Data Issues"],
+            key="phase27_asset_status_filter",
+        )
+        filter_a, filter_b, filter_c = st.columns(3)
+        with filter_a:
+            asset_focus = st.selectbox("Asset focus", ["All assets"] + get_supported_assets(), key="phase26_asset_plan_focus")
+        with filter_b:
+            sort_choice = st.selectbox(
+                "Sort by", ["OpportunityScore", "RecheckPriority", "Confidence", "Asset", "Horizon"],
+                key="phase27_asset_plan_sort",
+            )
+        with filter_c:
+            show_plan_evidence = st.checkbox("Show advanced evidence", value=False, key="phase27_asset_plan_evidence")
+
+        display_asset_plans = ranked_plans.copy()
         if asset_focus != "All assets":
-            best_by_asset = best_by_asset[best_by_asset["Asset"].astype(str).eq(asset_focus)]
-        _render_asset_plan_cards(best_by_asset, show_advanced=True)
-        render_section_header("Downloads", "Export the current simple plans and portfolio summary.")
+            display_asset_plans = display_asset_plans[display_asset_plans["Asset"].astype(str).eq(asset_focus)]
+        status_filters = {
+            "Watch": ["Watch"], "Wait": ["Wait", "Not Enough Evidence"],
+            "High Risk": ["High Risk", "Avoid"], "Data Issues": ["Data Issue"],
+        }
+        if filter_choice == "Closest to Track":
+            display_asset_plans = display_asset_plans.nsmallest(8, "ClosestToTrackRank")
+        elif filter_choice in status_filters:
+            display_asset_plans = display_asset_plans[display_asset_plans["Status"].isin(status_filters[filter_choice])]
+
+        if sort_choice == "OpportunityScore":
+            display_asset_plans = display_asset_plans.sort_values("OpportunityScore", ascending=False)
+        elif sort_choice == "RecheckPriority":
+            priority_order = {"High": 0, "Medium": 1, "Low": 2}
+            display_asset_plans = display_asset_plans.assign(
+                _sort=display_asset_plans["RecheckPriority"].map(priority_order).fillna(3)
+            ).sort_values(["_sort", "OpportunityScore"], ascending=[True, False]).drop(columns="_sort")
+        elif sort_choice == "Confidence":
+            confidence_order = {"Higher": 0, "Moderate": 1, "Low": 2}
+            display_asset_plans = display_asset_plans.assign(
+                _sort=display_asset_plans["Confidence"].map(confidence_order).fillna(3)
+            ).sort_values(["_sort", "OpportunityScore"], ascending=[True, False]).drop(columns="_sort")
+        else:
+            display_asset_plans = display_asset_plans.sort_values(sort_choice)
+
+        if display_asset_plans.empty:
+            render_empty_state("No plans match this view", "Change the status or asset filter to review another part of the research set.")
+        else:
+            _render_asset_plan_cards(display_asset_plans, show_advanced=show_plan_evidence)
+            detail_options = [f"{row.Asset} · {int(row.Horizon)}D" for row in display_asset_plans.itertuples()]
+            detail_choice = st.selectbox("Beginner plan detail", detail_options, key="phase29_asset_plan_detail")
+            detail_index = detail_options.index(detail_choice)
+            detail_row = display_asset_plans.iloc[detail_index].to_dict()
+            saved_final = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+            final_match = saved_final[
+                saved_final["Asset"].astype(str).eq(str(detail_row.get("Asset")))
+                & pd.to_numeric(saved_final["BestHorizon"], errors="coerce").eq(int(detail_row.get("Horizon", 0)))
+            ] if not saved_final.empty else pd.DataFrame()
+            if not final_match.empty:
+                detail_row.update(final_match.iloc[0].to_dict())
+            else:
+                detail_row = generate_cost_aware_asset_plan(detail_row, amount=10000, cost_assumptions=default_cost_assumptions(str(detail_row.get("Asset"))))
+                detail_row["SimplePlan"] = generate_final_user_plan(detail_row)
+            detail_a, detail_b = st.columns(2)
+            with detail_a:
+                render_score_explainer_card(detail_row)
+                render_cost_summary_card(detail_row)
+            with detail_b:
+                render_active_vs_passive_card(detail_row)
+                render_simple_plan_card(detail_row)
+
+        high_risk_explanations = build_high_risk_explanations(ranked_plans)
+        monitoring_plan = build_monitoring_plan(ranked_plans)
+        render_section_header("Downloads", "Export the rankings, complete plan cards, and portfolio interpretation.")
         render_download_buttons(
             {
-                "Asset plans": (asset_plans, "asset_plans.csv"),
-                "Portfolio plan": (portfolio_plan, "portfolio_plan.csv"),
+                "Opportunity rankings": (ranked_plans, "phase27_opportunity_rankings.csv"),
+                "Asset plan cards": (ranked_plans, "phase27_asset_plan_cards.csv"),
+                "Portfolio summary": (portfolio_plan, "phase27_portfolio_summary.csv"),
+                "High-risk explanations": (high_risk_explanations, "phase27_high_risk_explanations.csv"),
+                "Monitoring plan": (monitoring_plan, "phase27_monitoring_plan.csv"),
             }
         )
 
 
 elif page == "Forecast Explorer":
-    st.markdown('<p class="main-header">Forecast Explorer</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Asset-routed history and saved forecast evidence, presented as research estimates</p>', unsafe_allow_html=True)
-    render_research_disclaimer()
+    render_premium_header(
+        "Forecast Explorer",
+        "Inspect correctly routed price history and saved forecast evidence for one asset and horizon.",
+        "Research estimates",
+    )
+    render_disclaimer_banner()
+    render_glass_container("Forecasts are research estimates, not guarantees.", "Use the forecast with benchmark, regime, risk, and data-freshness evidence rather than as a standalone decision.")
     forecast_a, forecast_b, forecast_c = st.columns(3)
     with forecast_a:
         explorer_asset = st.selectbox("Asset", get_supported_assets(), index=get_supported_assets().index(selected_asset), key="phase26_forecast_asset")
@@ -767,13 +1461,31 @@ elif page == "Forecast Explorer":
     market_history = _load_cached_market_history()
     history_rows = {"90 days": 90, "180 days": 180, "1 year": 252, "3 years": 756, "Full history": None}[history_window]
     if market_history.empty or explorer_target not in market_history.columns:
-        st.warning(f"No cached price history is available for {explorer_asset}. Refresh data from Advanced Diagnostics before using this view.")
+        render_empty_state(
+            f"No cached {explorer_asset} history",
+            "Refresh data from Advanced Diagnostics before using this view. The app will not substitute another asset.",
+        )
     else:
         selected_history = market_history[[explorer_target]].dropna()
         if history_rows is not None:
             selected_history = selected_history.tail(history_rows)
-        st.markdown(f"### {explorer_asset} Price History")
+        render_section_header(f"{explorer_asset} price history", f"Target column: {explorer_target} · window: {history_window}")
         st.line_chart(selected_history, width="stretch")
+
+    render_section_header("How to read this forecast")
+    how_a, how_b = st.columns(2)
+    with how_a:
+        render_navigation_card(
+            "Forecast line and range",
+            "The line represents the saved research estimate. Any range represents uncertainty, not a guaranteed path.",
+            "Compare the selected horizon with current history",
+        )
+    with how_b:
+        render_navigation_card(
+            "Why it should not be used alone",
+            "A plausible forecast can still fail benchmarks, occur in an unstable regime, or carry unacceptable drawdown and data risk.",
+            "Review the matching Asset Plan",
+        )
 
     explorer_snapshot = st.session_state.get("phase26_research_snapshot")
     if not isinstance(explorer_snapshot, pd.DataFrame):
@@ -782,6 +1494,8 @@ elif page == "Forecast Explorer":
     explorer_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(explorer_plans, pd.DataFrame):
         explorer_plans = _load_phase26_table("phase26_asset_plans")
+    if not explorer_plans.empty:
+        explorer_plans = rank_asset_plans(explorer_plans)
     current_plan = explorer_plans[
         explorer_plans.get("Asset", pd.Series(dtype=str)).astype(str).eq(explorer_asset)
         & pd.to_numeric(explorer_plans.get("Horizon", pd.Series(dtype=float)), errors="coerce").eq(int(explorer_horizon))
@@ -789,6 +1503,26 @@ elif page == "Forecast Explorer":
     if not current_plan.empty:
         row = current_plan.iloc[0]
         render_status_card("Current research status", row.get("Status", "Not Enough Evidence"), row.get("Summary", ""), _status_card_style(str(row.get("Status", ""))))
+
+    final_report = st.session_state.get("phase29_user_report")
+    final_snapshot = (
+        final_report.get("AllAssetPredictionSnapshot", pd.DataFrame())
+        if isinstance(final_report, dict)
+        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+    )
+    matching_final = final_snapshot[final_snapshot["Asset"].astype(str).eq(explorer_asset)] if isinstance(final_snapshot, pd.DataFrame) and not final_snapshot.empty else pd.DataFrame()
+    if not matching_final.empty and int(matching_final.iloc[0].get("BestHorizon", 0) or 0) == int(explorer_horizon):
+        render_prediction_snapshot_card(matching_final.iloc[0].to_dict())
+        render_cost_summary_card(matching_final.iloc[0].to_dict())
+    else:
+        latest_rows = _latest_user_price_snapshot()
+        latest_match = latest_rows[latest_rows["Asset"].astype(str).eq(explorer_asset)] if not latest_rows.empty else pd.DataFrame()
+        if not latest_match.empty:
+            render_metric_grid([{
+                "title": "Current price", "value": f"{float(latest_match.iloc[0].get('LatestPrice')):,.2f}",
+                "subtitle": f"Latest available dataset price · {latest_match.iloc[0].get('LatestPriceDate', '')}", "status": "info",
+            }])
+        st.info("No matching saved predicted price is available for this asset and horizon. The app does not substitute another horizon or asset.")
 
     forecast_mask = explorer_evidence.get("Metric", pd.Series(dtype=str)).astype(str).str.contains("forecast|predicted|probability", case=False, regex=True, na=False)
     forecast_table = explorer_evidence.loc[forecast_mask, ["Asset", "Horizon", "Metric", "Value", "Status", "Freshness"]].copy()
@@ -804,14 +1538,124 @@ elif page == "Forecast Explorer":
             file_name=f"{_safe_filename_part(explorer_asset)}_{int(explorer_horizon)}d_forecast_evidence.csv",
             mime="text/csv",
         )
-    with st.expander("Technical evidence", expanded=False):
+    with st.expander("Show technical evidence", expanded=False):
         st.dataframe(explorer_evidence, width="stretch", hide_index=True)
 
 
+elif page == "Cost-Aware Plan":
+    render_hero_section(
+        "Paper-simulation cost reality",
+        "Understand the cost before tracking an idea",
+        "Adjust brokerage, spread, slippage, taxes, fees, and other assumptions to see how much movement is needed just to break even.",
+    )
+    render_disclaimer_banner()
+    st.info(COST_DISCLAIMER)
+
+    saved_snapshot = st.session_state.get("phase29_user_report")
+    cost_snapshot = (
+        saved_snapshot.get("AllAssetPredictionSnapshot", pd.DataFrame())
+        if isinstance(saved_snapshot, dict)
+        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+    )
+    asset_plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(asset_plans, pd.DataFrame):
+        asset_plans = _load_phase26_table("phase26_asset_plans")
+    if not isinstance(asset_plans, pd.DataFrame):
+        asset_plans = pd.DataFrame()
+
+    cost_a, cost_b, cost_c = st.columns(3)
+    if st.session_state.get("phase29_cost_asset") not in get_supported_assets():
+        st.session_state.phase29_cost_asset = selected_asset
+    if st.session_state.get("phase29_cost_horizon") not in get_available_horizons():
+        st.session_state.phase29_cost_horizon = int(selected_horizon)
+    with cost_a:
+        cost_asset = st.selectbox("Asset", get_supported_assets(), key="phase29_cost_asset")
+    with cost_b:
+        cost_horizon = st.selectbox(
+            "Horizon", get_available_horizons(), format_func=lambda value: f"{int(value)}D",
+            key="phase29_cost_horizon",
+        )
+    with cost_c:
+        simulated_amount = st.number_input("Simulated amount", min_value=0.0, value=10000.0, step=1000.0, key="phase29_cost_amount")
+
+    render_section_header("Editable cost assumptions", "These are paper-simulation inputs, not broker quotes.")
+    assumptions = render_cost_assumption_inputs(default_cost_assumptions(cost_asset), key_prefix="phase29_cost")
+    assumptions["Amount"] = simulated_amount
+
+    selected_plan = {}
+    if not asset_plans.empty:
+        matches = asset_plans[
+            asset_plans["Asset"].astype(str).eq(cost_asset)
+            & pd.to_numeric(asset_plans["Horizon"], errors="coerce").eq(int(cost_horizon))
+        ]
+        if not matches.empty:
+            selected_plan = matches.iloc[0].to_dict()
+    if isinstance(cost_snapshot, pd.DataFrame) and not cost_snapshot.empty:
+        snapshot_match = cost_snapshot[cost_snapshot["Asset"].astype(str).eq(cost_asset)]
+        if not snapshot_match.empty and int(snapshot_match.iloc[0].get("BestHorizon", 0) or 0) == int(cost_horizon):
+            selected_plan.update(snapshot_match.iloc[0].to_dict())
+    research_snapshot = st.session_state.get("phase26_research_snapshot")
+    if not isinstance(research_snapshot, pd.DataFrame):
+        research_snapshot = load_latest_research_snapshot()
+    exact_estimates = resolve_horizon_estimates(
+        cost_asset,
+        int(cost_horizon),
+        research_snapshot=research_snapshot,
+        master_dataset=_load_cached_market_history(),
+    )
+    selected_plan.update({key: value for key, value in exact_estimates.items() if value is not None})
+    selected_plan.update({"Asset": cost_asset, "Horizon": int(cost_horizon)})
+    cost_plan = generate_cost_aware_asset_plan(
+        selected_plan, amount=simulated_amount, cost_assumptions=assumptions,
+    )
+    cost_plan["SimplePlan"] = generate_final_user_plan(cost_plan)
+
+    render_section_header("Cost summary", "Gross estimates are reduced by the entered round-trip assumptions.")
+    render_metric_grid([
+        {"title": "Simulated amount", "value": f"{simulated_amount:,.2f}", "subtitle": "Paper simulation only", "status": "neutral"},
+        {"title": "Round-trip cost", "value": f"{float(cost_plan.get('EstimatedRoundTripCost', 0)):,.2f}", "subtitle": COST_DISCLAIMER, "status": "warning"},
+        {"title": "Cost drag", "value": f"{float(cost_plan.get('CostDragPct', 0)):.2f}%", "subtitle": str(cost_plan.get("CostVerdict", "MissingEstimate")), "status": "warning"},
+        {"title": "Break-even return", "value": f"{float(cost_plan.get('BreakEvenReturnPct', 0)):.2f}%", "subtitle": "Movement needed to cover assumptions", "status": "info"},
+        {"title": "Predicted active move", "value": "Run Full Research first" if pd.isna(pd.to_numeric(cost_plan.get("GrossActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossActiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("ActiveEstimateExplanation", "No saved estimate for this horizon yet")), "status": "neutral"},
+        {"title": "Passive benchmark move", "value": "No forward estimate" if pd.isna(pd.to_numeric(cost_plan.get("GrossPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossPassiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("PassiveEstimateExplanation", "The passive benchmark remains a comparison reference")), "status": "neutral"},
+        {"title": "Net active estimate", "value": "Run Full Research first" if pd.isna(pd.to_numeric(cost_plan.get("NetActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetActiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("ActiveEstimateExplanation", "No saved estimate for this horizon yet")), "status": "info"},
+        {"title": "Net passive estimate", "value": "Awaiting benchmark estimate" if pd.isna(pd.to_numeric(cost_plan.get("NetPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetPassiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("PassiveEstimateExplanation", "The passive benchmark remains a comparison reference")), "status": "info"},
+    ])
+    if not bool(cost_plan.get("ActiveEstimateAvailable", False)):
+        st.info(str(cost_plan.get("ActiveEstimateExplanation", "Run Full Research first to generate an active estimate.")))
+    if not bool(cost_plan.get("PassiveEstimateAvailable", False)):
+        st.info(str(cost_plan.get("PassiveEstimateExplanation", "No passive benchmark estimate is available for this horizon yet. The benchmark is still shown as a comparison reference.")))
+    if str(cost_plan.get("EstimateComparisonStatus", "")) == "MissingEstimate":
+        render_beginner_explanation_box(
+            "Missing estimate",
+            str(cost_plan.get("CostComparisonExplanation", "Cost comparison will appear after active/passive estimates are available.")),
+        )
+    detail_a, detail_b = st.columns(2)
+    with detail_a:
+        render_cost_summary_card(cost_plan)
+        render_score_explainer_card(cost_plan)
+    with detail_b:
+        render_active_vs_passive_card(cost_plan)
+        render_beginner_explanation_box("What this means", str(cost_plan.get("BeginnerExplanation", "A complete estimate is not available yet.")))
+    render_simple_plan_card(cost_plan)
+    with st.expander("Advanced calculations", expanded=False):
+        st.json({key: cost_plan.get(key) for key in (
+            "EstimatedEntryCost", "EstimatedExitCost", "EstimatedRoundTripCost", "CostDragPct",
+            "BreakEvenReturnPct", "GrossActiveEstimatePct", "NetActiveEstimatePct",
+            "GrossPassiveEstimatePct", "NetPassiveEstimatePct", "ActiveMinusPassiveNetPct",
+        )})
+        st.json(assumptions)
+    render_download_buttons({"Cost-aware plan": (pd.DataFrame([cost_plan]), f"phase29_{_safe_filename_part(cost_asset)}_{int(cost_horizon)}d_cost_plan.csv")})
+
+
 elif page == "Portfolio Summary":
-    st.markdown('<p class="main-header">Portfolio Summary</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">A cross-asset view of what to track, watch, wait on, or avoid</p>', unsafe_allow_html=True)
-    render_research_disclaimer()
+    render_premium_header(
+        "Portfolio Summary",
+        "A cross-asset interpretation of opportunity closeness, active blockers, and what deserves the next review.",
+        "Portfolio research condition",
+    )
+    render_disclaimer_banner()
+    render_blocked_capital_banner()
     portfolio_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(portfolio_plans, pd.DataFrame):
         portfolio_plans = _load_phase26_table("phase26_asset_plans")
@@ -819,21 +1663,58 @@ elif page == "Portfolio Summary":
     if not isinstance(portfolio_summary, pd.DataFrame):
         portfolio_summary = _load_phase26_table("phase26_portfolio_plan")
     if portfolio_plans.empty or portfolio_summary.empty:
-        st.warning("No portfolio summary is available. Generate a research plan first.")
+        render_empty_state("No portfolio summary", "Generate a research plan first so the assistant can summarize the saved cross-asset evidence.")
     else:
+        portfolio_plans = rank_asset_plans(portfolio_plans)
+        portfolio_summary = generate_portfolio_plan(portfolio_plans)
         summary = portfolio_summary.iloc[0]
+        final_portfolio_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+        if not final_portfolio_snapshot.empty:
+            render_section_header("Current market snapshot", "Latest available prices with final cost and benchmark context.")
+            render_market_snapshot_grid(
+                final_portfolio_snapshot,
+                on_view_plan=lambda asset, horizon: _navigate_to_plan(asset, "Asset Plans", horizon),
+            )
+            portfolio_gaps = pd.to_numeric(final_portfolio_snapshot.get("ActiveMinusPassiveNetPct"), errors="coerce")
+            portfolio_cost_drag = pd.to_numeric(final_portfolio_snapshot.get("CostDragPct"), errors="coerce")
+            render_metric_grid([
+                {"title": "Cost-blocked ideas", "value": int(final_portfolio_snapshot["CostVerdict"].eq("CostsTooHighForSignal").sum()), "subtitle": "Estimated move does not clear costs", "status": "warning"},
+                {"title": "Passive benchmark stronger", "value": int(portfolio_gaps.lt(0).sum()), "subtitle": "After entered cost assumptions", "status": "info"},
+                {"title": "Average cost drag", "value": f"{float(portfolio_cost_drag.mean()):.2f}%" if portfolio_cost_drag.notna().any() else "Not available", "subtitle": COST_DISCLAIMER, "status": "warning"},
+                {"title": "What to monitor next", "value": "Outcomes + costs", "subtitle": "Then compare with the same passive dates", "status": "neutral"},
+            ])
         render_metric_grid(
             [
-                {"title": "Track", "value": int(summary.get("TrackCount", 0)), "subtitle": str(summary.get("BestToTrack", "None")), "status": "positive"},
+                {"title": "Overall research condition", "value": str(summary.get("OverallResearchCondition", "Evidence constrained")), "subtitle": "No real-money approval", "status": "warning"},
+                {"title": "Closest to Track", "value": str(summary.get("ClosestToTrack", "None")), "subtitle": f"Opportunity score {float(summary.get('ClosestOpportunityScore', 0)):.0f}/100", "status": "info"},
                 {"title": "Watch", "value": int(summary.get("WatchCount", 0)), "subtitle": "Interesting but not strong enough", "status": "info"},
-                {"title": "Wait", "value": int(summary.get("WaitCount", 0)), "subtitle": "More evidence is needed", "status": "neutral"},
-                {"title": "Avoid / High Risk", "value": int(summary.get("AvoidHighRiskCount", 0)), "subtitle": "Risk or weak evidence dominates", "status": "critical"},
+                {"title": "High Risk", "value": int(summary.get("AvoidHighRiskCount", 0)), "subtitle": "Risk or weak evidence dominates", "status": "critical"},
                 {"title": "Data Issues", "value": int(summary.get("DataIssueCount", 0)), "subtitle": "Repair before interpretation", "status": "warning"},
             ]
         )
-        st.warning(f"Main market risk: {summary.get('MainMarketRisk', '')}")
-        st.info(f"What to recheck next: {summary.get('WhatToRecheckNext', '')}")
-        st.caption(str(summary.get("ApprovalExplanation", "Real-money decisions are not approved.")))
+        summary_a, summary_b = st.columns(2)
+        with summary_a:
+            render_risk_explanation_card(
+                "Why the system is cautious",
+                str(summary.get("WhySystemIsCautious", "Evidence remains conditional.")),
+                f"Main risk theme: {summary.get('MainRiskTheme', summary.get('MainMarketRisk', 'Unknown'))}",
+            )
+        with summary_b:
+            render_monitoring_card(
+                "What to monitor next",
+                str(summary.get("WhatUserShouldMonitorNext", summary.get("WhatToRecheckNext", "Review the next evidence update."))),
+                str(summary.get("NextReviewTrigger", "After the next saved evidence refresh.")),
+            )
+        render_glass_container(
+            "A useful cautious result",
+            "If most assets are High Risk, the best action is not to force a decision. The useful output is knowing what to monitor and what conditions would need to improve.",
+        )
+        render_section_header("Closest research opportunities", "The ranking does not override any High Risk or Data Issue status.")
+        for row_start in range(0, min(6, len(portfolio_plans)), 2):
+            columns = st.columns(2)
+            for column, (_, opportunity) in zip(columns, portfolio_plans.iloc[row_start:row_start + 2].iterrows()):
+                with column:
+                    render_opportunity_card(opportunity.to_dict())
         for status_group, labels in (
             ("Track candidates", ["Track"]),
             ("Watchlist", ["Watch"]),
@@ -850,9 +1731,12 @@ elif page == "Portfolio Summary":
 
 
 elif page == "About / Methodology":
-    st.markdown('<p class="main-header">About / Methodology</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">How the research assistant turns technical evidence into simple plans</p>', unsafe_allow_html=True)
-    render_research_disclaimer()
+    render_premium_header(
+        "About / Methodology",
+        "How the research assistant turns technical evidence into simple, conservative plans.",
+        "Transparent by design",
+    )
+    render_disclaimer_banner()
     render_section_header("What the assistant does")
     st.write(
         "The assistant combines saved forecast, signal, validation, benchmark, replay, risk, regime, portfolio, "
@@ -972,7 +1856,7 @@ elif page == "Overview Command Center":
         ],
         columns=["Workspace", "Purpose", "Suggested Starting Page"],
     )
-    st.dataframe(guide, use_container_width=True, hide_index=True)
+    st.dataframe(guide, width="stretch", hide_index=True)
 
     render_safe_table(
         overview_freshness,
@@ -1155,7 +2039,7 @@ elif page == "ℹ️ About Project":
             ],
             columns=["Layer", "Tools"],
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1175,11 +2059,11 @@ elif page == "📊 Dataset Explorer":
 
     with tab1:
         n_rows = st.slider("Rows to display", 10, 200, 50)
-        st.dataframe(df_raw.tail(n_rows), use_container_width=True)
+        st.dataframe(df_raw.tail(n_rows), width="stretch")
 
     with tab2:
         st.markdown("#### Descriptive Statistics")
-        st.dataframe(df_raw.describe().T, use_container_width=True)
+        st.dataframe(df_raw.describe().T, width="stretch")
 
         st.markdown("#### Missing Values")
         null_counts = df_raw.isnull().sum()
@@ -1187,7 +2071,7 @@ elif page == "📊 Dataset Explorer":
         if null_df.empty:
             st.success("No missing values in the dataset ✓")
         else:
-            st.dataframe(null_df, use_container_width=True)
+            st.dataframe(null_df, width="stretch")
 
     with tab3:
         csv = df_raw.to_csv().encode("utf-8")
@@ -1224,7 +2108,7 @@ elif page == "📈 Technical Indicators":
             if col in recent.columns:
                 fig.add_trace(go.Scatter(x=recent.index, y=recent[col], name=f"SMA-{p}", line=dict(color=color)))
         fig.update_layout(template="plotly_dark", title="Price with Moving Averages")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab2:
         recent = df_ind.tail(n_days)
@@ -1233,7 +2117,7 @@ elif page == "📈 Technical Indicators":
         fig.add_hline(y=70, line_dash="dash", line_color="red")
         fig.add_hline(y=30, line_dash="dash", line_color="green")
         fig.update_layout(template="plotly_dark", title="RSI", yaxis_range=[0, 100])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     with tab3:
         recent = df_ind.tail(n_days)
@@ -1242,7 +2126,7 @@ elif page == "📈 Technical Indicators":
         fig.add_trace(go.Scatter(x=recent.index, y=recent["MACD"], name="MACD", line=dict(color="#1f77b4")))
         fig.add_trace(go.Scatter(x=recent.index, y=recent["MACD_Signal"], name="Signal", line=dict(color="#D4AF37")))
         fig.update_layout(template="plotly_dark", title="MACD")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1291,7 +2175,7 @@ elif page == "🤖 Train Models":
 
         st.success(f"✔ Training complete for {selected_asset} — {len(trainer.results)} model(s) trained.")
         board = trainer.get_leaderboard("test")
-        st.dataframe(board, use_container_width=True)
+        st.dataframe(board, width="stretch")
 
     elif st.session_state.trained:
         st.info("Models already trained this session. Go to **Compare Models** to view results, or retrain above.")
@@ -1315,14 +2199,14 @@ elif page == "🏆 Compare Models":
         metric = st.selectbox("Sort/compare by metric", ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"])
         board = trainer.get_leaderboard("test")
 
-        st.dataframe(board, use_container_width=True)
+        st.dataframe(board, width="stretch")
 
         st.markdown("### Baseline Checks")
         data = st.session_state.data
         try:
             baseline_board = price_baseline_leaderboard(data)
             st.caption("Baselines use only known price anchors. Naive baseline means: tomorrow's price = today's price.")
-            st.dataframe(baseline_board, use_container_width=True)
+            st.dataframe(baseline_board, width="stretch")
 
             summary = model_vs_naive_summary(board, baseline_board)
             if summary:
@@ -1341,7 +2225,7 @@ elif page == "🏆 Compare Models":
             st.warning(f"Could not calculate baseline checks: {exc}")
 
         fig = viz.plot_model_comparison_plotly(board, metric=metric)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         best_name, best_result = trainer.get_best_model("test")
         st.success(f"🏆 Best Model: **{best_name}** — RMSE = ${best_result.metrics_test['RMSE']:.2f}, R² = {best_result.metrics_test['R2']:.4f}")
@@ -1352,7 +2236,7 @@ elif page == "🏆 Compare Models":
             data.prices_test, best_result.predictions_test, data.test_index,
             title=f"{selected_asset} / {best_name} — Actual vs Predicted",
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1470,7 +2354,7 @@ elif page == "🔮 Prediction":
             st.session_state.backtest_df = None
             st.warning(f"Could not prepare backtesting data: {exc}")
 
-        st.dataframe(export_df.tail(20), use_container_width=True)
+        st.dataframe(export_df.tail(20), width="stretch")
 
         csv = export_df.to_csv(index=False).encode("utf-8")
         st.download_button(
@@ -1580,13 +2464,13 @@ elif page == "📉 Backtesting":
         st.line_chart(equity[["position"]])
 
         with st.expander("View backtest input data"):
-            st.dataframe(backtest_df.tail(30), use_container_width=True)
+            st.dataframe(backtest_df.tail(30), width="stretch")
 
         st.markdown("### Trade Summary")
         if trades.empty:
             st.info("No trades were generated with this threshold.")
         else:
-            st.dataframe(trades, use_container_width=True)
+            st.dataframe(trades, width="stretch")
 
 
 
@@ -1613,7 +2497,7 @@ elif page == "🎯 Directional Models":
         st.markdown("### Directional Baselines")
         try:
             dir_base = directional_baseline_leaderboard(data, pp)
-            st.dataframe(dir_base, use_container_width=True)
+            st.dataframe(dir_base, width="stretch")
         except Exception as exc:
             st.warning(f"Could not calculate directional baselines: {exc}")
 
@@ -1635,7 +2519,7 @@ elif page == "🎯 Directional Models":
         if dir_results:
             st.markdown("### Directional Model Leaderboard")
             dir_board = directional_leaderboard(dir_results)
-            st.dataframe(dir_board, use_container_width=True)
+            st.dataframe(dir_board, width="stretch")
 
             valid_names = [name for name, res in dir_results.items() if len(res.probabilities_test) == len(data.prices_test)]
             if not valid_names:
@@ -1699,7 +2583,7 @@ elif page == "🎯 Directional Models":
             st.line_chart(equity[["position"]])
 
             with st.expander("View directional backtest input data"):
-                st.dataframe(equity.tail(50), use_container_width=True)
+                st.dataframe(equity.tail(50), width="stretch")
 
 
 
@@ -1761,17 +2645,17 @@ elif page == "🧠 Feature Intelligence":
         tab1, tab2, tab3 = st.tabs(["Feature Families", "Missingness", "Preview"])
         with tab1:
             st.markdown("### Feature Family Counts")
-            st.dataframe(audit.family_counts, use_container_width=True)
+            st.dataframe(audit.family_counts, width="stretch")
             st.markdown("### Sample Phase 5 Columns")
             st.write(audit.sample_columns)
         with tab2:
             st.markdown("### Missingness After Cleaning")
             st.caption("This should usually be near zero because the feature module forward-fills past values and drops only early warm-up rows.")
-            st.dataframe(audit.missing_summary, use_container_width=True)
+            st.dataframe(audit.missing_summary, width="stretch")
         with tab3:
             st.markdown("### Latest FI_* Feature Values")
             if preview is not None and not preview.empty:
-                st.dataframe(preview, use_container_width=True)
+                st.dataframe(preview, width="stretch")
             else:
                 st.info("No preview data available.")
 
@@ -1824,7 +2708,7 @@ elif page == "🧪 Research Validation":
             )
             try:
                 report = build_validation_report(trainer, data, df_features)
-                st.dataframe(report.trust_scores, use_container_width=True)
+                st.dataframe(report.trust_scores, width="stretch")
                 if not report.trust_scores.empty:
                     best = report.trust_scores.iloc[0]
                     c1, c2, c3 = st.columns(3)
@@ -1839,7 +2723,7 @@ elif page == "🧪 Research Validation":
                         st.success("A high-trust candidate exists, but still requires live paper-trading validation.")
 
                 st.markdown("### Price Baselines")
-                st.dataframe(report.baseline_board, use_container_width=True)
+                st.dataframe(report.baseline_board, width="stretch")
             except Exception as exc:
                 st.error(f"Validation report failed: {exc}")
 
@@ -1850,7 +2734,7 @@ elif page == "🧪 Research Validation":
             result = trainer.results[model_name]
             try:
                 regime_board = regime_performance(data, result.predictions_test)
-                st.dataframe(regime_board, use_container_width=True)
+                st.dataframe(regime_board, width="stretch")
                 if not regime_board.empty:
                     worst = regime_board.sort_values("DirectionalAccuracy", ascending=True).iloc[0]
                     st.warning(
@@ -1896,14 +2780,14 @@ elif page == "🧪 Research Validation":
                 c2.metric("RMSE Std", f"{summary['StdRMSE']:.2f}")
                 c3.metric("Mean Direction", f"{summary['MeanDirectionalAccuracy']:.2f}%")
                 c4.metric("Stability Score", f"{summary['StabilityScore']:.2f}/100")
-                st.dataframe(folds, use_container_width=True)
+                st.dataframe(folds, width="stretch")
 
         with tab4:
             st.markdown("### Leakage / Alignment Audit")
             st.caption("This checks target alignment, scaler leakage, target exclusion, and extreme feature correlation with next-day target.")
             try:
                 report = build_validation_report(trainer, data, df_features)
-                st.dataframe(report.leakage_report, use_container_width=True)
+                st.dataframe(report.leakage_report, width="stretch")
                 bad = report.leakage_report[report.leakage_report["Status"].isin(["FAIL", "ERROR"])]
                 review = report.leakage_report[report.leakage_report["Status"].eq("REVIEW")]
                 if not bad.empty:
@@ -2028,7 +2912,7 @@ elif page == "🌐 Multi-Asset Matrix":
         c4.metric("Do Not Trust", status.get("DoNotTrust", 0))
 
         if summary is not None and not summary.empty:
-            st.dataframe(summary, use_container_width=True)
+            st.dataframe(summary, width="stretch")
 
             do_not = summary[summary["AssetVerdict"].astype(str).str.contains("Do not trust", case=False, na=False)]
             if not do_not.empty:
@@ -2053,7 +2937,7 @@ elif page == "🌐 Multi-Asset Matrix":
             st.markdown("### All Models Across All Assets")
             st.caption("Sorts all asset/model pairs by conservative trust score. High R² alone does not dominate this score.")
             if report.model_leaderboard is not None and not report.model_leaderboard.empty:
-                st.dataframe(report.model_leaderboard, use_container_width=True)
+                st.dataframe(report.model_leaderboard, width="stretch")
             else:
                 st.info("No model leaderboard available.")
 
@@ -2061,14 +2945,14 @@ elif page == "🌐 Multi-Asset Matrix":
             st.markdown("### Baselines Across All Assets")
             st.caption("This shows whether an ML model beats simple logic such as tomorrow=today or moving averages.")
             if report.baseline_leaderboard is not None and not report.baseline_leaderboard.empty:
-                st.dataframe(report.baseline_leaderboard, use_container_width=True)
+                st.dataframe(report.baseline_leaderboard, width="stretch")
             else:
                 st.info("No baseline table available.")
 
         with tab_c:
             st.markdown("### Leakage / Alignment Checks Across Assets")
             if report.leakage_matrix is not None and not report.leakage_matrix.empty:
-                st.dataframe(report.leakage_matrix, use_container_width=True)
+                st.dataframe(report.leakage_matrix, width="stretch")
                 failures = report.leakage_matrix[report.leakage_matrix["Status"].isin(["FAIL", "ERROR"])]
                 reviews = report.leakage_matrix[report.leakage_matrix["Status"].eq("REVIEW")]
                 if not failures.empty:
@@ -2083,14 +2967,14 @@ elif page == "🌐 Multi-Asset Matrix":
         with tab_d:
             st.markdown("### Walk-Forward Summary")
             if report.walk_forward_summary is not None and not report.walk_forward_summary.empty:
-                st.dataframe(report.walk_forward_summary, use_container_width=True)
+                st.dataframe(report.walk_forward_summary, width="stretch")
             else:
                 st.info("Walk-forward was not run, or no walk-forward summary was produced.")
 
         with tab_e:
             st.markdown("### Assets / Models That Failed")
             if report.errors is not None and not report.errors.empty:
-                st.dataframe(report.errors, use_container_width=True)
+                st.dataframe(report.errors, width="stretch")
             else:
                 st.success("No asset-level errors in the last multi-asset validation run.")
 
@@ -2190,7 +3074,7 @@ elif page == "🎯 Direct Forecast Models":
             b3.metric("Best Direction vs Baseline", f"{float(best['Direction_vs_Baseline_%']):+.2f}%")
             b4.metric("Best Verdict", str(best["Verdict"]))
 
-            st.dataframe(leaderboard, use_container_width=True)
+            st.dataframe(leaderboard, width="stretch")
 
             failed_return = leaderboard[leaderboard["RMSE_vs_Naive_%"].astype(float) < 0]
             failed_direction = leaderboard[leaderboard["Direction_vs_Baseline_%"].astype(float) <= 0]
@@ -2221,14 +3105,14 @@ elif page == "🎯 Direct Forecast Models":
         with tab_base:
             st.markdown("### Naive Baselines")
             if direct_report.baseline_board is not None and not direct_report.baseline_board.empty:
-                st.dataframe(direct_report.baseline_board, use_container_width=True)
+                st.dataframe(direct_report.baseline_board, width="stretch")
             else:
                 st.warning("No baseline board was produced.")
 
         with tab_errors:
             st.markdown("### Model Failures")
             if direct_report.errors is not None and not direct_report.errors.empty:
-                st.dataframe(direct_report.errors, use_container_width=True)
+                st.dataframe(direct_report.errors, width="stretch")
             else:
                 st.success("No model-level errors in the last direct forecast run.")
 
@@ -2360,7 +3244,7 @@ elif page == "🧭 Direct Horizon Scanner":
                 st.error("All scanned asset-horizon combinations are Do Not Trust for Signals.")
 
             st.markdown("### Asset × Horizon Summary")
-            st.dataframe(summary, use_container_width=True)
+            st.dataframe(summary, width="stretch")
 
             csv = summary.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -2380,21 +3264,21 @@ elif page == "🧭 Direct Horizon Scanner":
         with tab_top:
             st.markdown("### Top Promising Asset-Horizon Combinations")
             if scan_report.top_promising is not None and not scan_report.top_promising.empty:
-                st.dataframe(scan_report.top_promising, use_container_width=True)
+                st.dataframe(scan_report.top_promising, width="stretch")
             else:
                 st.warning("No non-DoNotTrust combinations were found in this scan.")
 
         with tab_worst:
             st.markdown("### Worst Failed Combinations")
             if scan_report.worst_failed is not None and not scan_report.worst_failed.empty:
-                st.dataframe(scan_report.worst_failed, use_container_width=True)
+                st.dataframe(scan_report.worst_failed, width="stretch")
             else:
                 st.info("No failed combinations available.")
 
         with tab_errors:
             st.markdown("### Scan Errors")
             if scan_report.errors is not None and not scan_report.errors.empty:
-                st.dataframe(scan_report.errors, use_container_width=True)
+                st.dataframe(scan_report.errors, width="stretch")
             else:
                 st.success("No scanner errors in the last run.")
 
@@ -2406,7 +3290,7 @@ elif page == "🧭 Direct Horizon Scanner":
                     st.success("No future_return_*, future_direction_*, or future_realized_vol_* columns were used as features.")
                 else:
                     st.error("Future target columns leaked into scanner features. Do not trust this run.")
-                    st.dataframe(leaks[["Asset", "Horizon", "FeatureLeakageColumns"]], use_container_width=True)
+                    st.dataframe(leaks[["Asset", "Horizon", "FeatureLeakageColumns"]], width="stretch")
             else:
                 st.info("No leakage metadata available.")
 
@@ -2560,7 +3444,7 @@ elif page == "🧪 Signal Research Scanner":
                 st.error("All scanned combinations failed the robust validation-locked signal criteria.")
 
             st.markdown("### Full Signal Research Results")
-            st.dataframe(full_results, use_container_width=True)
+            st.dataframe(full_results, width="stretch")
             full_csv = full_results.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "📥 Export Full Signal Scan CSV",
@@ -2579,14 +3463,14 @@ elif page == "🧪 Signal Research Scanner":
         with tab_top:
             st.markdown("### Top Robust Candidates")
             if top_candidates is not None and not top_candidates.empty:
-                st.dataframe(top_candidates, use_container_width=True)
+                st.dataframe(top_candidates, width="stretch")
             else:
                 st.warning("No robust research candidates survived validation-locked realistic evaluation.")
 
         with tab_failed:
             st.markdown("### Failed And Weak Combinations")
             if failed_candidates is not None and not failed_candidates.empty:
-                st.dataframe(failed_candidates, use_container_width=True)
+                st.dataframe(failed_candidates, width="stretch")
             else:
                 st.success("No failed or weak combinations in this scan.")
 
@@ -2595,7 +3479,7 @@ elif page == "🧪 Signal Research Scanner":
             candidate_results = signal_scan_report.candidate_results
             if candidate_results is not None and not candidate_results.empty:
                 st.caption("Cooldown candidates are validation-only diagnostics. Locked test is evaluated once after the cooldown is selected.")
-                st.dataframe(candidate_results, use_container_width=True)
+                st.dataframe(candidate_results, width="stretch")
                 candidate_csv = candidate_results.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "📥 Export Cooldown Candidate CSV",
@@ -2609,7 +3493,7 @@ elif page == "🧪 Signal Research Scanner":
         with tab_errors:
             st.markdown("### Scan Errors")
             if signal_scan_report.errors is not None and not signal_scan_report.errors.empty:
-                st.dataframe(signal_scan_report.errors, use_container_width=True)
+                st.dataframe(signal_scan_report.errors, width="stretch")
             else:
                 st.success("No scanner errors in the last run.")
 
@@ -2739,7 +3623,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
                     st.warning(warning)
 
         st.markdown("### Candidate Summary")
-        st.dataframe(diag_report.candidate_summary, use_container_width=True)
+        st.dataframe(diag_report.candidate_summary, width="stretch")
         st.download_button(
             "📥 Export Candidate Summary CSV",
             data=diag_report.candidate_summary.to_csv(index=False).encode("utf-8"),
@@ -2757,7 +3641,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
 
         with tab_trade:
             st.markdown("### Trade Diagnostics")
-            st.dataframe(diag_report.trade_diagnostics, use_container_width=True)
+            st.dataframe(diag_report.trade_diagnostics, width="stretch")
             st.download_button(
                 "📥 Export Trade Diagnostics CSV",
                 data=diag_report.trade_diagnostics.to_csv(index=False).encode("utf-8"),
@@ -2766,7 +3650,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
             )
 
             st.markdown("### Trade Log")
-            st.dataframe(diag_report.trade_log, use_container_width=True)
+            st.dataframe(diag_report.trade_log, width="stretch")
             st.download_button(
                 "📥 Export Trade Log CSV",
                 data=diag_report.trade_log.to_csv(index=False).encode("utf-8"),
@@ -2776,7 +3660,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
 
         with tab_time:
             st.markdown("### Monthly Returns")
-            st.dataframe(diag_report.monthly_returns, use_container_width=True)
+            st.dataframe(diag_report.monthly_returns, width="stretch")
             st.download_button(
                 "📥 Export Monthly Returns CSV",
                 data=diag_report.monthly_returns.to_csv(index=False).encode("utf-8"),
@@ -2785,7 +3669,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
             )
 
             st.markdown("### Quarterly Returns")
-            st.dataframe(diag_report.quarterly_returns, use_container_width=True)
+            st.dataframe(diag_report.quarterly_returns, width="stretch")
             st.download_button(
                 "📥 Export Quarterly Returns CSV",
                 data=diag_report.quarterly_returns.to_csv(index=False).encode("utf-8"),
@@ -2798,7 +3682,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
             if diag_report.equity_curve is not None and not diag_report.equity_curve.empty:
                 equity_chart = diag_report.equity_curve.set_index("Date")[["Equity"]]
                 st.line_chart(equity_chart)
-            st.dataframe(diag_report.equity_curve, use_container_width=True)
+            st.dataframe(diag_report.equity_curve, width="stretch")
             st.download_button(
                 "📥 Export Equity Curve CSV",
                 data=diag_report.equity_curve.to_csv(index=False).encode("utf-8"),
@@ -2810,7 +3694,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
             if diag_report.drawdown_curve is not None and not diag_report.drawdown_curve.empty:
                 dd_chart = diag_report.drawdown_curve.set_index("Date")[["Drawdown_%"]]
                 st.line_chart(dd_chart)
-            st.dataframe(diag_report.drawdown_curve, use_container_width=True)
+            st.dataframe(diag_report.drawdown_curve, width="stretch")
             st.download_button(
                 "📥 Export Drawdown Curve CSV",
                 data=diag_report.drawdown_curve.to_csv(index=False).encode("utf-8"),
@@ -2821,7 +3705,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
         with tab_sensitivity:
             st.markdown("### Cost Sensitivity")
             st.caption("Uses the validation-selected threshold and cooldown, then re-evaluates locked-test economics at each transaction cost.")
-            st.dataframe(diag_report.cost_sensitivity, use_container_width=True)
+            st.dataframe(diag_report.cost_sensitivity, width="stretch")
             st.download_button(
                 "📥 Export Cost Sensitivity CSV",
                 data=diag_report.cost_sensitivity.to_csv(index=False).encode("utf-8"),
@@ -2831,7 +3715,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
 
             st.markdown("### Validation Split Sensitivity")
             st.caption("Each split re-runs validation-locked selection independently. Locked-test metrics are post-selection diagnostics.")
-            st.dataframe(diag_report.validation_split_sensitivity, use_container_width=True)
+            st.dataframe(diag_report.validation_split_sensitivity, width="stretch")
             st.download_button(
                 "📥 Export Split Sensitivity CSV",
                 data=diag_report.validation_split_sensitivity.to_csv(index=False).encode("utf-8"),
@@ -2842,7 +3726,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
         with tab_probability:
             st.markdown("### Probability Diagnostics")
             st.caption("These are descriptive P(up) diagnostics. They are not calibration claims.")
-            st.dataframe(diag_report.probability_diagnostics, use_container_width=True)
+            st.dataframe(diag_report.probability_diagnostics, width="stretch")
             st.download_button(
                 "📥 Export Probability Diagnostics CSV",
                 data=diag_report.probability_diagnostics.to_csv(index=False).encode("utf-8"),
@@ -2851,7 +3735,7 @@ elif page == "🔬 Candidate Deep Diagnostics":
             )
 
             st.markdown("### Probability Bins")
-            st.dataframe(diag_report.probability_bins, use_container_width=True)
+            st.dataframe(diag_report.probability_bins, width="stretch")
             st.download_button(
                 "📥 Export Probability Bins CSV",
                 data=diag_report.probability_bins.to_csv(index=False).encode("utf-8"),
@@ -3001,7 +3885,7 @@ elif page == "🛡️ Risk-Controlled Upgrade":
         st.json(selected_info)
 
         st.markdown("### Baseline vs Best Risk-Controlled Variant")
-        st.dataframe(risk_report.baseline_vs_best, use_container_width=True)
+        st.dataframe(risk_report.baseline_vs_best, width="stretch")
         st.download_button(
             "📥 Export Baseline vs Best CSV",
             data=risk_report.baseline_vs_best.to_csv(index=False).encode("utf-8"),
@@ -3014,7 +3898,7 @@ elif page == "🛡️ Risk-Controlled Upgrade":
         with tab_variants:
             st.markdown("### Full Variant Table")
             st.caption("Non-selected variants show validation metrics only. Locked test is evaluated for the baseline reference and validation-selected variant.")
-            st.dataframe(risk_report.full_variant_table, use_container_width=True)
+            st.dataframe(risk_report.full_variant_table, width="stretch")
             st.download_button(
                 "📥 Export Full Variant CSV",
                 data=risk_report.full_variant_table.to_csv(index=False).encode("utf-8"),
@@ -3025,7 +3909,7 @@ elif page == "🛡️ Risk-Controlled Upgrade":
         with tab_costs:
             st.markdown("### Cost / Slippage Stress")
             st.caption("Post-selection stress table. It is not used to choose the risk-control variant.")
-            st.dataframe(risk_report.cost_stress_table, use_container_width=True)
+            st.dataframe(risk_report.cost_stress_table, width="stretch")
             st.download_button(
                 "📥 Export Cost Stress CSV",
                 data=risk_report.cost_stress_table.to_csv(index=False).encode("utf-8"),
@@ -3182,7 +4066,7 @@ elif page == "🧭 Walk-Forward Validation":
                 st.caption(f"{len(wf_report.warnings) - 8} additional warnings are included in the tables.")
 
         st.markdown("### Aggregate Walk-Forward Summary")
-        st.dataframe(wf_report.aggregate_summary, use_container_width=True)
+        st.dataframe(wf_report.aggregate_summary, width="stretch")
         st.download_button(
             "📥 Export Aggregate CSV",
             data=wf_report.aggregate_summary.to_csv(index=False).encode("utf-8"),
@@ -3193,7 +4077,7 @@ elif page == "🧭 Walk-Forward Validation":
         tab_windows, tab_errors = st.tabs(["Per-Window Results", "Errors"])
         with tab_windows:
             st.markdown("### Per-Window Results")
-            st.dataframe(wf_report.window_results, use_container_width=True)
+            st.dataframe(wf_report.window_results, width="stretch")
             st.download_button(
                 "📥 Export Per-Window CSV",
                 data=wf_report.window_results.to_csv(index=False).encode("utf-8"),
@@ -3204,7 +4088,7 @@ elif page == "🧭 Walk-Forward Validation":
         with tab_errors:
             st.markdown("### Walk-Forward Errors")
             if wf_report.errors is not None and not wf_report.errors.empty:
-                st.dataframe(wf_report.errors, use_container_width=True)
+                st.dataframe(wf_report.errors, width="stretch")
             else:
                 st.success("No walk-forward errors in the last run.")
 
@@ -3342,7 +4226,7 @@ elif page == "🧠 Regime-Aware Meta Signal":
                 st.caption(f"{len(meta_report.warnings) - 10} additional warnings are included in the decision table.")
 
         st.markdown("### Meta Decision Table")
-        st.dataframe(meta_report.decision_table, use_container_width=True)
+        st.dataframe(meta_report.decision_table, width="stretch")
         st.download_button(
             "📥 Export Meta Decisions CSV",
             data=meta_report.decision_table.to_csv(index=False).encode("utf-8"),
@@ -3359,12 +4243,12 @@ elif page == "🧠 Regime-Aware Meta Signal":
                 if subset.empty:
                     st.info(f"No {decision} rows in the latest meta analysis.")
                 else:
-                    st.dataframe(subset, use_container_width=True)
+                    st.dataframe(subset, width="stretch")
 
         diag_a, diag_b, diag_c = st.tabs(["Regimes", "Reliability / Risk", "Summary"])
         with diag_a:
             st.markdown("### Current Regime Features")
-            st.dataframe(meta_report.regime_features, use_container_width=True)
+            st.dataframe(meta_report.regime_features, width="stretch")
             st.download_button(
                 "📥 Export Regime Features CSV",
                 data=meta_report.regime_features.to_csv(index=False).encode("utf-8"),
@@ -3389,10 +4273,10 @@ elif page == "🧠 Regime-Aware Meta Signal":
                 "Warnings",
             ]
             available_cols = [col for col in cols if col in meta_report.decision_table.columns]
-            st.dataframe(meta_report.decision_table[available_cols], use_container_width=True)
+            st.dataframe(meta_report.decision_table[available_cols], width="stretch")
         with diag_c:
             st.markdown("### Decision Summary")
-            st.dataframe(summary, use_container_width=True)
+            st.dataframe(summary, width="stretch")
             st.download_button(
                 "📥 Export Decision Summary CSV",
                 data=summary.to_csv(index=False).encode("utf-8"),
@@ -3495,7 +4379,7 @@ elif page == "🧾 Meta Decision Audit":
                 st.warning(warning)
 
         st.markdown("### Meta Decision Audit Table")
-        st.dataframe(audit_report.audit_table, use_container_width=True)
+        st.dataframe(audit_report.audit_table, width="stretch")
         st.download_button(
             "📥 Export Audit CSV",
             data=audit_report.audit_table.to_csv(index=False).encode("utf-8"),
@@ -3510,7 +4394,7 @@ elif page == "🧾 Meta Decision Audit":
 
         with tab_blocking:
             st.markdown("### Most Common Blocking Rules")
-            st.dataframe(audit_report.common_blocking_rules, use_container_width=True)
+            st.dataframe(audit_report.common_blocking_rules, width="stretch")
             st.download_button(
                 "📥 Export Blocking Rules CSV",
                 data=audit_report.common_blocking_rules.to_csv(index=False).encode("utf-8"),
@@ -3521,14 +4405,14 @@ elif page == "🧾 Meta Decision Audit":
 
             cols = ["Asset", "Horizon", "Current MetaDecision", "Calibrated MetaDecision", "MainBlockingRule", "BlockingRules"]
             available = [col for col in cols if col in audit_report.audit_table.columns]
-            st.dataframe(audit_report.audit_table[available], use_container_width=True)
+            st.dataframe(audit_report.audit_table[available], width="stretch")
 
         with tab_passing:
             st.markdown("### Passing Rules")
             cols = ["Asset", "Horizon", "Current MetaDecision", "Calibrated MetaDecision", "PassingRules"]
             available = [col for col in cols if col in audit_report.audit_table.columns]
             passing_table = audit_report.audit_table[available]
-            st.dataframe(passing_table, use_container_width=True)
+            st.dataframe(passing_table, width="stretch")
             st.download_button(
                 "📥 Export Passing Rules CSV",
                 data=passing_table.to_csv(index=False).encode("utf-8"),
@@ -3539,7 +4423,7 @@ elif page == "🧾 Meta Decision Audit":
 
         with tab_near:
             st.markdown("### Top Near-Miss Candidates")
-            st.dataframe(audit_report.near_miss_candidates, use_container_width=True)
+            st.dataframe(audit_report.near_miss_candidates, width="stretch")
             st.download_button(
                 "📥 Export Near Misses CSV",
                 data=audit_report.near_miss_candidates.to_csv(index=False).encode("utf-8"),
@@ -3551,7 +4435,7 @@ elif page == "🧾 Meta Decision Audit":
         with tab_rankings:
             rank_a, rank_b, rank_c = st.tabs(["Top Blocked", "Highest Confidence", "Highest Risk"])
             with rank_a:
-                st.dataframe(audit_report.top_blocked_candidates, use_container_width=True)
+                st.dataframe(audit_report.top_blocked_candidates, width="stretch")
                 st.download_button(
                     "📥 Export Top Blocked CSV",
                     data=audit_report.top_blocked_candidates.to_csv(index=False).encode("utf-8"),
@@ -3560,7 +4444,7 @@ elif page == "🧾 Meta Decision Audit":
                     key="meta_audit_top_blocked_download",
                 )
             with rank_b:
-                st.dataframe(audit_report.highest_confidence_candidates, use_container_width=True)
+                st.dataframe(audit_report.highest_confidence_candidates, width="stretch")
                 st.download_button(
                     "📥 Export Highest Confidence CSV",
                     data=audit_report.highest_confidence_candidates.to_csv(index=False).encode("utf-8"),
@@ -3569,7 +4453,7 @@ elif page == "🧾 Meta Decision Audit":
                     key="meta_audit_high_conf_download",
                 )
             with rank_c:
-                st.dataframe(audit_report.highest_risk_candidates, use_container_width=True)
+                st.dataframe(audit_report.highest_risk_candidates, width="stretch")
                 st.download_button(
                     "📥 Export Highest Risk CSV",
                     data=audit_report.highest_risk_candidates.to_csv(index=False).encode("utf-8"),
@@ -3580,7 +4464,7 @@ elif page == "🧾 Meta Decision Audit":
 
         with tab_modes:
             st.markdown("### Decision Counts by Mode")
-            st.dataframe(audit_report.mode_comparison, use_container_width=True)
+            st.dataframe(audit_report.mode_comparison, width="stretch")
             st.download_button(
                 "📥 Export Mode Comparison CSV",
                 data=audit_report.mode_comparison.to_csv(index=False).encode("utf-8"),
@@ -3591,7 +4475,7 @@ elif page == "🧾 Meta Decision Audit":
 
         with tab_thresholds:
             st.markdown("### Threshold Configuration")
-            st.dataframe(audit_report.threshold_config, use_container_width=True)
+            st.dataframe(audit_report.threshold_config, width="stretch")
             st.download_button(
                 "📥 Export Threshold Config CSV",
                 data=audit_report.threshold_config.to_csv(index=False).encode("utf-8"),
@@ -3701,7 +4585,7 @@ elif page == "🏷️ Meta Reliability Grading":
                 st.warning(warning)
 
         st.markdown("### Reliability Grading Table")
-        st.dataframe(grading_report.grading_table, use_container_width=True)
+        st.dataframe(grading_report.grading_table, width="stretch")
         st.download_button(
             "📥 Export Reliability Grading CSV",
             data=grading_report.grading_table.to_csv(index=False).encode("utf-8"),
@@ -3716,7 +4600,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_counts:
             st.markdown("### Grade Counts")
-            st.dataframe(grading_report.grade_counts, use_container_width=True)
+            st.dataframe(grading_report.grade_counts, width="stretch")
             st.download_button(
                 "📥 Export Grade Counts CSV",
                 data=grading_report.grade_counts.to_csv(index=False).encode("utf-8"),
@@ -3727,7 +4611,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_research:
             st.markdown("### Top A/B/C Research Candidates")
-            st.dataframe(grading_report.top_research_candidates, use_container_width=True)
+            st.dataframe(grading_report.top_research_candidates, width="stretch")
             st.download_button(
                 "📥 Export Top Research CSV",
                 data=grading_report.top_research_candidates.to_csv(index=False).encode("utf-8"),
@@ -3738,7 +4622,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_defensive:
             st.markdown("### Defensive Watch List")
-            st.dataframe(grading_report.defensive_watchlist, use_container_width=True)
+            st.dataframe(grading_report.defensive_watchlist, width="stretch")
             st.download_button(
                 "📥 Export Defensive Watch CSV",
                 data=grading_report.defensive_watchlist.to_csv(index=False).encode("utf-8"),
@@ -3749,7 +4633,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_archive:
             st.markdown("### Avoid / Archive List")
-            st.dataframe(grading_report.avoid_archive_list, use_container_width=True)
+            st.dataframe(grading_report.avoid_archive_list, width="stretch")
             st.download_button(
                 "📥 Export Avoid Archive CSV",
                 data=grading_report.avoid_archive_list.to_csv(index=False).encode("utf-8"),
@@ -3760,7 +4644,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_actions:
             st.markdown("### Top Next Actions")
-            st.dataframe(grading_report.next_action_summary, use_container_width=True)
+            st.dataframe(grading_report.next_action_summary, width="stretch")
             st.download_button(
                 "📥 Export Next Actions CSV",
                 data=grading_report.next_action_summary.to_csv(index=False).encode("utf-8"),
@@ -3771,7 +4655,7 @@ elif page == "🏷️ Meta Reliability Grading":
 
         with tab_components:
             st.markdown("### Score Component Breakdown")
-            st.dataframe(grading_report.score_components, use_container_width=True)
+            st.dataframe(grading_report.score_components, width="stretch")
             st.download_button(
                 "📥 Export Score Components CSV",
                 data=grading_report.score_components.to_csv(index=False).encode("utf-8"),
@@ -3959,7 +4843,7 @@ elif page == "🧪 Evidence Expansion":
         st.caption(f"Last run settings: {st.session_state.get('evidence_expansion_settings') or {}}")
 
         st.markdown("### Overall Summary")
-        st.dataframe(evidence_report.overall_summary, use_container_width=True)
+        st.dataframe(evidence_report.overall_summary, width="stretch")
 
         tab_promote, tab_full, tab_cost, tab_warn, tab_config, tab_detail = st.tabs(
             [
@@ -3974,7 +4858,7 @@ elif page == "🧪 Evidence Expansion":
 
         with tab_promote:
             st.markdown("### Promotion / Demotion Recommendations")
-            st.dataframe(evidence_report.promotion_recommendations, use_container_width=True)
+            st.dataframe(evidence_report.promotion_recommendations, width="stretch")
             st.download_button(
                 "📥 Export Promotion Recommendations CSV",
                 data=evidence_report.promotion_recommendations.to_csv(index=False).encode("utf-8"),
@@ -3983,7 +4867,7 @@ elif page == "🧪 Evidence Expansion":
                 key="evidence_promotion_download",
             )
             st.markdown("### Candidate Robustness Summary")
-            st.dataframe(evidence_report.robustness_summary, use_container_width=True)
+            st.dataframe(evidence_report.robustness_summary, width="stretch")
             st.download_button(
                 "📥 Export Robustness Summary CSV",
                 data=evidence_report.robustness_summary.to_csv(index=False).encode("utf-8"),
@@ -3994,7 +4878,7 @@ elif page == "🧪 Evidence Expansion":
 
         with tab_full:
             st.markdown("### Full Expanded Evidence Table")
-            st.dataframe(evidence_report.full_evidence_table, use_container_width=True)
+            st.dataframe(evidence_report.full_evidence_table, width="stretch")
             st.download_button(
                 "📥 Export Full Evidence CSV",
                 data=evidence_report.full_evidence_table.to_csv(index=False).encode("utf-8"),
@@ -4005,7 +4889,7 @@ elif page == "🧪 Evidence Expansion":
 
         with tab_cost:
             st.markdown("### Cost Sensitivity Summary")
-            st.dataframe(evidence_report.cost_sensitivity_summary, use_container_width=True)
+            st.dataframe(evidence_report.cost_sensitivity_summary, width="stretch")
             st.download_button(
                 "📥 Export Cost Sensitivity CSV",
                 data=evidence_report.cost_sensitivity_summary.to_csv(index=False).encode("utf-8"),
@@ -4016,7 +4900,7 @@ elif page == "🧪 Evidence Expansion":
 
         with tab_warn:
             st.markdown("### Warning Table")
-            st.dataframe(evidence_report.warning_table, use_container_width=True)
+            st.dataframe(evidence_report.warning_table, width="stretch")
             st.download_button(
                 "📥 Export Warning Table CSV",
                 data=evidence_report.warning_table.to_csv(index=False).encode("utf-8"),
@@ -4027,7 +4911,7 @@ elif page == "🧪 Evidence Expansion":
 
         with tab_config:
             st.markdown("### Configuration-Level Failure / Success Table")
-            st.dataframe(evidence_report.configuration_summary, use_container_width=True)
+            st.dataframe(evidence_report.configuration_summary, width="stretch")
             st.download_button(
                 "📥 Export Configuration Summary CSV",
                 data=evidence_report.configuration_summary.to_csv(index=False).encode("utf-8"),
@@ -4050,7 +4934,7 @@ elif page == "🧪 Evidence Expansion":
                     evidence_report.full_evidence_table["Asset"].astype(str).eq(selected_asset_label)
                     & evidence_report.full_evidence_table["Horizon"].astype(int).eq(selected_horizon_value)
                 ]
-                st.dataframe(detail, use_container_width=True)
+                st.dataframe(detail, width="stretch")
             else:
                 st.info("No candidate detail rows available.")
 
@@ -4196,7 +5080,7 @@ elif page == "🔎 Evidence Quality Diagnostics":
     else:
         st.caption(f"Last run settings: {st.session_state.get('evidence_quality_diagnostics_settings') or {}}")
         st.markdown("### Overall Evidence Quality Summary")
-        st.dataframe(quality_report.overall_summary, use_container_width=True)
+        st.dataframe(quality_report.overall_summary, width="stretch")
         st.download_button(
             "📥 Export Overall Summary CSV",
             data=quality_report.overall_summary.to_csv(index=False).encode("utf-8"),
@@ -4232,7 +5116,7 @@ elif page == "🔎 Evidence Quality Diagnostics":
         for tab, (title, table, filename) in zip(tabs, table_specs):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -4363,7 +5247,7 @@ elif page == "📈 Signal Policy Sensitivity":
     else:
         st.caption(f"Last run settings: {st.session_state.get('signal_policy_sensitivity_settings') or {}}")
         st.markdown("### Overall Policy Sensitivity Summary")
-        st.dataframe(policy_report.overall_summary, use_container_width=True)
+        st.dataframe(policy_report.overall_summary, width="stretch")
         st.download_button("📥 Export Overall Summary CSV", data=policy_report.overall_summary.to_csv(index=False).encode("utf-8"), file_name="signal_policy_overall_summary.csv", mime="text/csv", key="policy_overall_download")
 
         tabs = st.tabs(["Recommendations", "Coverage Recovery", "Coverage vs Edge", "Thresholds", "Cooldowns", "Probability Bands", "Horizons", "Warnings", "Next Actions", "Full Table"])
@@ -4382,7 +5266,7 @@ elif page == "📈 Signal Policy Sensitivity":
         for tab, (title, table, filename) in zip(tabs, policy_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(f"📥 Export {title} CSV", data=table.to_csv(index=False).encode("utf-8"), file_name=filename, mime="text/csv", key=f"{filename}_download")
 
 
@@ -4557,7 +5441,7 @@ elif page == "🎯 Probability Calibration":
         if not calibration_report.warning_table.empty and calibration_report.warning_table["WarningType"].astype(str).eq("ProbabilityUnreliable").any():
             st.warning("At least one candidate has unreliable probability evidence. Keep it in diagnostics.")
         st.markdown("### Overall Calibration Summary")
-        st.dataframe(calibration_report.overall_summary, use_container_width=True)
+        st.dataframe(calibration_report.overall_summary, width="stretch")
         st.download_button("📥 Export Overall Summary CSV", data=calibration_report.overall_summary.to_csv(index=False).encode("utf-8"), file_name="probability_calibration_overall_summary.csv", mime="text/csv", key="prob_cal_overall_download")
 
         tabs = st.tabs([
@@ -4585,7 +5469,7 @@ elif page == "🎯 Probability Calibration":
         for tab, (title, table, filename) in zip(tabs, calibration_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(f"📥 Export {title} CSV", data=table.to_csv(index=False).encode("utf-8"), file_name=filename, mime="text/csv", key=f"{filename}_download")
 
 
@@ -4733,7 +5617,7 @@ elif page == "📈 Forward Paper Evidence":
             st.warning("Not enough forward evidence yet. Keep collecting paper outcomes before drawing conclusions.")
 
         st.markdown("### Forward Evidence Coverage")
-        st.dataframe(forward_report.asset_horizon_forward_coverage, use_container_width=True)
+        st.dataframe(forward_report.asset_horizon_forward_coverage, width="stretch")
 
         tabs = st.tabs([
             "Signal Log",
@@ -4756,7 +5640,7 @@ elif page == "📈 Forward Paper Evidence":
         for tab, (title, table, filename) in zip(tabs, forward_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -4850,7 +5734,7 @@ elif page == "🧭 Actionable Research Plan":
     }
     plan_input_source_table = build_input_source_table(list(plan_resolved_inputs.values()))
     st.markdown("### Input Sources")
-    st.dataframe(plan_input_source_table, use_container_width=True)
+    st.dataframe(plan_input_source_table, width="stretch")
 
     plan_col_a, plan_col_b, plan_col_c, plan_col_d = st.columns(4)
     with plan_col_a:
@@ -4936,7 +5820,7 @@ elif page == "🧭 Actionable Research Plan":
             st.warning("Real capital remains blocked; paper-only and watchlist research actions are shown when evidence supports tracking.")
 
         st.markdown("### Executive Summary")
-        st.dataframe(plan_report.executive_decision_table, use_container_width=True)
+        st.dataframe(plan_report.executive_decision_table, width="stretch")
         st.download_button(
             "📥 Export Executive Summary CSV",
             data=plan_report.executive_decision_table.to_csv(index=False).encode("utf-8"),
@@ -4974,7 +5858,7 @@ elif page == "🧭 Actionable Research Plan":
         for tab, (title, table, filename) in zip(tabs, plan_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -5125,9 +6009,9 @@ elif page == "🧠 Daily Research Control Center":
             st.info("Conditional capital plans are capped, monitored, and invalidation-driven. They are not guarantees or trade execution instructions.")
 
         st.markdown("### Daily Executive Summary")
-        st.dataframe(daily_report.daily_research_summary, use_container_width=True)
+        st.dataframe(daily_report.daily_research_summary, width="stretch")
         st.markdown("### Input Sources")
-        st.dataframe(daily_report.input_source_table, use_container_width=True)
+        st.dataframe(daily_report.input_source_table, width="stretch")
 
         tabs = st.tabs(
             [
@@ -5174,7 +6058,7 @@ elif page == "🧠 Daily Research Control Center":
                     st.info("No candidate passed every capital gate, so no structured capital plan is shown.")
                 if title == "Capital Blocker Table" and not daily_report.capital_eligibility_table.empty and daily_report.capital_eligibility_table["RealCapitalAllowed"].astype(bool).any():
                     st.caption("Some candidates passed strict capital gates; blockers remain visible for the rest.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -5335,9 +6219,9 @@ elif page == "💼 Portfolio & Capital Simulator":
                 st.info("Conditional allocations are capped by risk controls and remain research-only.")
 
         st.markdown("### Portfolio Executive Summary")
-        st.dataframe(portfolio_report.portfolio_summary_table, use_container_width=True)
+        st.dataframe(portfolio_report.portfolio_summary_table, width="stretch")
         st.markdown("### Input Sources")
-        st.dataframe(portfolio_report.input_source_table, use_container_width=True)
+        st.dataframe(portfolio_report.input_source_table, width="stretch")
 
         tabs = st.tabs(
             [
@@ -5378,7 +6262,7 @@ elif page == "💼 Portfolio & Capital Simulator":
                 st.markdown(f"### {title}")
                 if title == "Conditional Real-Capital Table" and table.empty:
                     st.info("No candidate passed Phase 11 real-capital gates, so no conditional capital allocation is shown.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -5537,9 +6421,9 @@ elif page == "⚠️ Risk & Warning Intelligence":
         oc3.metric("Paper Trading Status", paper_status)
 
         st.markdown("### Top Risks")
-        st.dataframe(risk_report.top_risks_table.head(10), use_container_width=True)
+        st.dataframe(risk_report.top_risks_table.head(10), width="stretch")
         st.markdown("### Input Sources")
-        st.dataframe(risk_report.input_source_table, use_container_width=True)
+        st.dataframe(risk_report.input_source_table, width="stretch")
 
         risk_tabs = st.tabs(
             [
@@ -5572,7 +6456,7 @@ elif page == "⚠️ Risk & Warning Intelligence":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -5735,9 +6619,9 @@ elif page == "📐 Dynamic Risk Sizing":
             sm4.metric("Real capital exposure", f"{float(summary_row.get('RealCapitalExposurePct', 0.0)):.2f}%")
 
         st.markdown("### Dynamic Sizing Table")
-        st.dataframe(sizing_report.dynamic_position_sizing_table, use_container_width=True)
+        st.dataframe(sizing_report.dynamic_position_sizing_table, width="stretch")
         st.markdown("### Input Sources")
-        st.dataframe(sizing_report.input_source_table, use_container_width=True)
+        st.dataframe(sizing_report.input_source_table, width="stretch")
 
         sizing_tabs = st.tabs(
             [
@@ -5772,7 +6656,7 @@ elif page == "📐 Dynamic Risk Sizing":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -5910,7 +6794,7 @@ elif page == "🌍 Market Regime Intelligence":
             st.info(str(regime_summary.get("RecommendedResearchPosture", "")))
 
         st.markdown("### Regime-Adjusted Paper Sizing")
-        st.dataframe(regime_report.regime_adjusted_sizing_table, use_container_width=True)
+        st.dataframe(regime_report.regime_adjusted_sizing_table, width="stretch")
 
         regime_tabs = st.tabs(
             [
@@ -5943,7 +6827,7 @@ elif page == "🌍 Market Regime Intelligence":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -6140,7 +7024,7 @@ elif page == "🏁 Strategy Benchmark Arena":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -6282,7 +7166,7 @@ elif page == "🏁 Strategy Benchmark Arena":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -6467,7 +7351,7 @@ elif page == "Phase 19: Signal Policy & Edge Repair Lab":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows are available for this table with the current evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -6655,7 +7539,7 @@ elif page == "Phase 20: True Historical ML Replay":
                 st.caption(_table_research_explanation(title))
                 if table.empty:
                     st.info("No rows are available for this table with the current evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -7213,7 +8097,7 @@ elif page == "🕰️ Historical Model Replay":
                 st.markdown(f"### {title}")
                 if table.empty:
                     st.info("No rows for this table with the currently loaded evidence.")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -7245,7 +8129,7 @@ elif page == "🗂️ Evidence Store":
         phase_filter_options = ["All"] + sorted(latest_artifacts["Phase"].dropna().astype(str).unique().tolist())
         selected_phase_filter = st.selectbox("Phase filter", phase_filter_options, index=0, key="evidence_store_phase_filter")
         display_latest = latest_artifacts if selected_phase_filter == "All" else latest_artifacts[latest_artifacts["Phase"].astype(str).eq(selected_phase_filter)]
-        st.dataframe(display_latest, use_container_width=True)
+        st.dataframe(display_latest, width="stretch")
         st.download_button(
             "📥 Export Latest Artifact Registry CSV",
             data=display_latest.to_csv(index=False).encode("utf-8"),
@@ -7273,7 +8157,7 @@ elif page == "🗂️ Evidence Store":
                         mime="text/csv",
                         key="artifact_store_selected_download",
                     )
-                    st.dataframe(selected_df.head(200), use_container_width=True)
+                    st.dataframe(selected_df.head(200), width="stretch")
             except Exception as exc:
                 st.error(f"Could not load selected artifact: {exc}")
 
@@ -7287,7 +8171,7 @@ elif page == "🗂️ Evidence Store":
         {"phase_name": "Phase 10 Actionable Research Plan", "artifact_name": "ranked_asset_horizon_plan", "required": False},
     ]
     diagnostics = validate_required_artifacts(required_specs)
-    st.dataframe(diagnostics, use_container_width=True)
+    st.dataframe(diagnostics, width="stretch")
 
     st.markdown("### Run History")
     run_rows = []
@@ -7303,7 +8187,7 @@ elif page == "🗂️ Evidence Store":
             }
         )
     run_history = pd.DataFrame(run_rows).sort_values("CreatedAt", ascending=False) if run_rows else pd.DataFrame(columns=["RunId", "Phase", "PhaseSlug", "CreatedAt", "ArtifactCount", "ManifestPath"])
-    st.dataframe(run_history, use_container_width=True)
+    st.dataframe(run_history, width="stretch")
     st.download_button(
         "📥 Export Run History CSV",
         data=run_history.to_csv(index=False).encode("utf-8"),
@@ -7491,7 +8375,7 @@ elif page == "🧾 True Raw Trade Logs":
     else:
         st.caption(f"Last run settings: {st.session_state.get('true_raw_trade_log_settings') or {}}")
         st.markdown("### Phase 8 Closure Readiness")
-        st.dataframe(true_report.phase8_closure_readiness_table, use_container_width=True)
+        st.dataframe(true_report.phase8_closure_readiness_table, width="stretch")
         st.download_button(
             "📥 Export Phase 8 Closure Readiness CSV",
             data=true_report.phase8_closure_readiness_table.to_csv(index=False).encode("utf-8"),
@@ -7529,7 +8413,7 @@ elif page == "🧾 True Raw Trade Logs":
         for tab, (title, table, filename) in zip(tabs, true_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -7678,7 +8562,7 @@ elif page == "📜 Raw Trade Log Exporter":
                 st.warning("Not enough raw trade logs for true calibration yet.")
 
         st.markdown("### Raw Log Quality Summary")
-        st.dataframe(raw_report.raw_log_quality_summary, use_container_width=True)
+        st.dataframe(raw_report.raw_log_quality_summary, width="stretch")
         st.download_button(
             "📥 Export Raw Log Quality Summary CSV",
             data=raw_report.raw_log_quality_summary.to_csv(index=False).encode("utf-8"),
@@ -7712,7 +8596,7 @@ elif page == "📜 Raw Trade Log Exporter":
         for tab, (title, table, filename) in zip(tabs, raw_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -7852,7 +8736,7 @@ elif page == "📒 Trade Evidence Ledger":
                 st.warning("Not enough trade-level evidence for true calibration yet.")
 
         st.markdown("### Ledger Quality Summary")
-        st.dataframe(ledger_report.ledger_quality_summary, use_container_width=True)
+        st.dataframe(ledger_report.ledger_quality_summary, width="stretch")
         st.download_button(
             "📥 Export Ledger Quality Summary CSV",
             data=ledger_report.ledger_quality_summary.to_csv(index=False).encode("utf-8"),
@@ -7884,7 +8768,7 @@ elif page == "📒 Trade Evidence Ledger":
         for tab, (title, table, filename) in zip(tabs, ledger_tables):
             with tab:
                 st.markdown(f"### {title}")
-                st.dataframe(table, use_container_width=True)
+                st.dataframe(table, width="stretch")
                 st.download_button(
                     f"📥 Export {title} CSV",
                     data=table.to_csv(index=False).encode("utf-8"),
@@ -8136,7 +9020,7 @@ elif page == "📡 Signal Engine":
 
         metric_df = pd.DataFrame([metrics]).T.reset_index()
         metric_df.columns = ["Metric", "Value"]
-        st.dataframe(metric_df, use_container_width=True)
+        st.dataframe(metric_df, width="stretch")
 
         warnings_text = str(metrics.get("Warnings", "") or "")
         if warnings_text:
@@ -8160,12 +9044,12 @@ elif page == "📡 Signal Engine":
                 if selected_threshold:
                     selected_df = pd.DataFrame([selected_threshold]).T.reset_index()
                     selected_df.columns = ["Field", "Value"]
-                    st.dataframe(selected_df, use_container_width=True)
+                    st.dataframe(selected_df, width="stretch")
 
                 st.markdown("### Validation vs Locked Test")
                 comparison = getattr(signal_result, "validation_test_comparison", pd.DataFrame())
                 if comparison is not None and not comparison.empty:
-                    st.dataframe(comparison, use_container_width=True)
+                    st.dataframe(comparison, width="stretch")
                     comparison_csv = comparison.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         "📥 Export Validation vs Test CSV",
@@ -8179,7 +9063,7 @@ elif page == "📡 Signal Engine":
                 st.markdown("### Validation Threshold Table")
                 validation_sweep = getattr(signal_result, "validation_sweep", pd.DataFrame())
                 if validation_sweep is not None and not validation_sweep.empty:
-                    st.dataframe(validation_sweep, use_container_width=True)
+                    st.dataframe(validation_sweep, width="stretch")
                     validation_csv = validation_sweep.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         "📥 Export Validation Threshold CSV",
@@ -8194,7 +9078,7 @@ elif page == "📡 Signal Engine":
 
         with tab_signals:
             st.markdown("### Realistic Trade Log" if result_style == "non_overlapping_realistic" else "### Overlapping Research Signal Log")
-            st.dataframe(signal_result.signal_frame, use_container_width=True)
+            st.dataframe(signal_result.signal_frame, width="stretch")
             signal_csv = signal_result.signal_frame.to_csv(index=True).encode("utf-8")
             st.download_button(
                 "📥 Export Trade/Signal Log CSV",
@@ -8214,7 +9098,7 @@ elif page == "📡 Signal Engine":
                 sweep_table = signal_result.threshold_sweep
 
             if sweep_table is not None and not sweep_table.empty:
-                st.dataframe(sweep_table, use_container_width=True)
+                st.dataframe(sweep_table, width="stretch")
                 sweep_csv = sweep_table.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "📥 Export Threshold Sweep CSV",
@@ -8227,9 +9111,9 @@ elif page == "📡 Signal Engine":
 
         with tab_phase6:
             st.markdown("### Phase 6 Direct Model Leaderboard")
-            st.dataframe(signal_output.leaderboard, use_container_width=True)
+            st.dataframe(signal_output.leaderboard, width="stretch")
             st.markdown("### Phase 6 Direction Baselines")
-            st.dataframe(signal_output.baseline_board, use_container_width=True)
+            st.dataframe(signal_output.baseline_board, width="stretch")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -8290,10 +9174,10 @@ elif page == "📅 30-Day Forecast":
                 asset_label=selected_asset,
                 n_history_days=90,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             st.markdown("### Forecast Table")
-            st.dataframe(forecast_df, use_container_width=True)
+            st.dataframe(forecast_df, width="stretch")
 
             csv = forecast_df.to_csv().encode("utf-8")
             st.download_button(

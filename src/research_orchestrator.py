@@ -492,3 +492,66 @@ __all__ = [
     "build_phase26_next_actions",
     "save_product_experience_artifacts",
 ]
+
+# === Phase 28 route-audit safety wrapper ===
+# Keeps the navigation audit synchronized with app.py routes added after Phase 26.
+try:
+    _phase28_original_build_navigation_audit = build_navigation_audit
+
+    def build_navigation_audit(*args, **kwargs):
+        import re as _re
+        from pathlib import Path as _Path
+        import pandas as _pd
+
+        audit = _phase28_original_build_navigation_audit(*args, **kwargs)
+
+        try:
+            app_source = _Path("app.py").read_text(encoding="utf-8")
+            route_labels = set(_re.findall(r'(?:if|elif) page == "([^"]+)"', app_source))
+            existing_labels = set(audit["PageLabel"].astype(str)) if "PageLabel" in audit.columns else set()
+
+            primary_pages = {
+                "Market Research Assistant",
+                "Asset Plans",
+                "Forecast Explorer",
+                "Portfolio Summary",
+                "About / Methodology",
+            }
+            user_journey_pages = {"Cost-Aware Plan", "Paper Research Journey"}
+
+            missing_rows = []
+            for label in sorted(route_labels - existing_labels):
+                is_primary = label in primary_pages
+                contains_phase = "phase" in label.lower()
+
+                row = {}
+                for col in audit.columns:
+                    if col == "PageLabel":
+                        row[col] = label
+                    elif col == "Group":
+                        row[col] = "PRIMARY USER PAGES" if is_primary else ("USER JOURNEY" if label in user_journey_pages else "ADVANCED DIAGNOSTICS")
+                    elif col == "IsPrimaryUserPage":
+                        row[col] = is_primary
+                    elif col == "IsAdvancedDiagnostic":
+                        row[col] = False if label in user_journey_pages else (not is_primary)
+                    elif col == "ContainsPhaseName":
+                        row[col] = contains_phase
+                    elif col == "UserFriendlyLabel":
+                        row[col] = label
+                    elif col == "ActionTaken":
+                        row[col] = "Added by Phase 28 route-audit sync"
+                    else:
+                        row[col] = ""
+
+                missing_rows.append(row)
+
+            if missing_rows:
+                audit = _pd.concat([audit, _pd.DataFrame(missing_rows)], ignore_index=True)
+
+        except Exception:
+            return audit
+
+        return audit
+
+except NameError:
+    pass
