@@ -82,3 +82,8 @@ test_feature_*.py
 text.py
 streamlit_integration/
 requirements_additions.txt
+
+# Local review / pytest temp files
+pip_freeze.txt
+project_tree.txt
+.pytest-phase*/
