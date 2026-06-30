@@ -583,7 +583,7 @@ def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
 def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> None:
     render_section_header(
         "Candidate Watchlist & Opportunity Tracker",
-        "Saved predictions are ranked through transparent score, cost, risk, and move-size gates. This is not a trading recommendation.",
+        "Ranked candidates from the latest saved research snapshot. These are watchlist classifications, not trading recommendations.",
     )
     if not _has_real_phase29_predictions(prediction_snapshot):
         render_empty_state(
@@ -1003,6 +1003,7 @@ NAVIGATION_GROUPS = {
 LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
 PRIMARY_PRODUCT_PAGES = [
     "Market Research Assistant",
+    "Candidate Watchlist",
     "Asset Plans",
     "Forecast Explorer",
     "Cost-Aware Plan",
@@ -1268,6 +1269,21 @@ if page == "Market Research Assistant":
                     st.info("No normalized evidence rows are available.")
                 else:
                     st.dataframe(phase26_snapshot.head(1000), width="stretch", hide_index=True)
+
+
+elif page == "Candidate Watchlist":
+    render_hero_section(
+        "Candidate Watchlist",
+        "Rank saved multi-asset ideas through conservative risk, cost, score, and move-size gates",
+        "Research candidates only",
+    )
+    render_disclaimer_banner()
+
+    phase29_snapshot = _get_phase29_snapshot()
+    if not _has_real_phase29_predictions(phase29_snapshot):
+        phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+
+    _render_candidate_watchlist_section(phase29_snapshot)
 
 
 elif page == "Paper Research Journey":
