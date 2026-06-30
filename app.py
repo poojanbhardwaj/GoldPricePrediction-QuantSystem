@@ -83,6 +83,17 @@ from src.evidence_of_edge import (
     load_latest_edge_metric_sources,
     summarize_edge_evidence,
 )
+from src.user_platform import (
+    apply_profile_defaults,
+    get_or_create_demo_user,
+    init_user_platform_db,
+    list_user_plan_runs,
+    load_latest_user_plan,
+    load_user_profile,
+    personalize_asset_plans,
+    save_user_plan_run,
+    save_user_profile,
+)
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
     train_directional_models,
@@ -789,6 +800,232 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
     })
 
 
+def _render_user_goals_saved_plans() -> None:
+    try:
+        init_user_platform_db()
+        user = get_or_create_demo_user()
+    except Exception as exc:
+        render_empty_state(
+            "Local plan storage is unavailable",
+            f"The demo-user database could not be opened: {exc}",
+        )
+        return
+
+    saved_profile = load_user_profile(int(user["id"]))
+    profile = apply_profile_defaults(saved_profile or {"name": user.get("name", "Demo User")})
+    supported_assets = get_supported_assets()
+
+    experience_options = ["Beginner", "Intermediate", "Advanced", "I don't know"]
+    goal_options = [
+        "Learn markets", "Long-term research", "Short-term monitoring",
+        "Risk monitoring", "I don't know",
+    ]
+    risk_options = [
+        "I hate losses", "I can handle small swings", "I can handle high volatility", "I don't know",
+    ]
+    position_options = [
+        "Planning only", "Already hold", "Do not currently hold", "I don't know",
+    ]
+    horizon_options = ["Auto", "1D", "5D", "10D", "20D", "30D"]
+    style_options = ["Conservative", "Balanced", "Aggressive", "Choose for me"]
+
+    goal_display = "Learn markets" if profile["goal_type"] == "Learning" else profile["goal_type"]
+    risk_display = {
+        "Low": "I hate losses",
+        "Medium": "I can handle small swings",
+        "High": "I can handle high volatility",
+    }.get(profile["risk_tolerance"], "I don't know")
+    preferred_default = (
+        ["Choose for me"]
+        if set(profile["preferred_assets"]) == set(supported_assets)
+        else [asset for asset in profile["preferred_assets"] if asset in supported_assets]
+    )
+
+    st.info(
+        "This is not financial advice. Do not enter broker or bank credentials. "
+        "All capital values are simulated, and plans cannot execute or approve real-money activity."
+    )
+    render_section_header(
+        "Tell us what you need",
+        "Simple answers are translated into conservative research defaults. You can choose 'I don't know'.",
+    )
+    with st.form("phase32a_user_profile_form"):
+        form_left, form_right = st.columns(2)
+        with form_left:
+            profile_name = st.text_input("Name", value=profile["name"])
+            experience = st.selectbox(
+                "Experience level",
+                experience_options,
+                index=experience_options.index(profile["experience_level"]) if profile["experience_level"] in experience_options else 0,
+            )
+            goal = st.selectbox(
+                "Goal",
+                goal_options,
+                index=goal_options.index(goal_display) if goal_display in goal_options else 0,
+            )
+            risk_comfort = st.selectbox(
+                "Risk comfort",
+                risk_options,
+                index=risk_options.index(risk_display),
+            )
+            existing_position = st.selectbox(
+                "Existing position",
+                position_options,
+                index=position_options.index(profile["existing_position"]) if profile["existing_position"] in position_options else 0,
+            )
+        with form_right:
+            preferred_assets = st.multiselect(
+                "Preferred assets",
+                ["Choose for me", *supported_assets],
+                default=preferred_default,
+            )
+            horizon = st.selectbox(
+                "Horizon",
+                horizon_options,
+                index=horizon_options.index(profile["default_horizon"]) if profile["default_horizon"] in horizon_options else 0,
+            )
+            simulated_capital = st.number_input(
+                "Simulated capital",
+                min_value=100.0,
+                value=float(profile["simulated_capital"]),
+                step=500.0,
+            )
+            style = st.selectbox(
+                "Style",
+                style_options,
+                index=style_options.index(profile["style"]) if profile["style"] in style_options else 0,
+            )
+            wants_simple_language = st.checkbox(
+                "Simple explanation mode", value=bool(profile["wants_simple_language"])
+            )
+        save_column, generate_column = st.columns(2)
+        with save_column:
+            save_clicked = st.form_submit_button("Save Profile")
+        with generate_column:
+            generate_clicked = st.form_submit_button("Generate Personalized Plan")
+
+    profile_input = apply_profile_defaults({
+        "name": profile_name,
+        "experience_level": experience,
+        "risk_comfort": risk_comfort,
+        "goal": goal,
+        "preferred_assets": [] if "Choose for me" in preferred_assets else preferred_assets,
+        "default_horizon": horizon,
+        "simulated_capital": simulated_capital,
+        "style": style,
+        "existing_position": existing_position,
+        "wants_simple_language": wants_simple_language,
+    })
+
+    if save_clicked or generate_clicked:
+        save_user_profile(int(user["id"]), profile_input)
+        st.success("Demo profile saved locally.")
+
+    generated_plans = pd.DataFrame()
+    if generate_clicked:
+        prediction_snapshot = _get_phase29_snapshot()
+        if not _has_real_phase29_predictions(prediction_snapshot):
+            st.warning(
+                "No complete saved prediction snapshot is available. The plan will keep missing evidence visible."
+            )
+            prediction_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+
+        report = st.session_state.get("phase29_user_report")
+        cost_plans = report.get("CostAwarePlans") if isinstance(report, dict) else None
+        if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+            cost_plans = report.get("CostAwareAssetPlans") if isinstance(report, dict) else None
+        if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+            cost_plans = _load_phase29_table("phase29_cost_aware_asset_plans.csv")
+        final_user_plans = report.get("FinalUserPlans") if isinstance(report, dict) else None
+        if not isinstance(final_user_plans, pd.DataFrame) or final_user_plans.empty:
+            final_user_plans = _load_phase29_table("phase29_final_user_plans.csv")
+        research_snapshot = st.session_state.get("phase26_research_snapshot")
+        if not isinstance(research_snapshot, pd.DataFrame) or research_snapshot.empty:
+            research_snapshot = _load_phase26_table("phase26_research_snapshot")
+
+        watchlist = build_candidate_watchlist(
+            prediction_snapshot,
+            cost_plans=cost_plans,
+            final_user_plans=final_user_plans,
+        )
+        validation_metrics = build_validation_metric_table(load_latest_edge_metric_sources())
+        edge_table = build_edge_evidence_table(
+            watchlist,
+            prediction_snapshot=prediction_snapshot,
+            cost_plans=cost_plans,
+            research_snapshot=research_snapshot,
+            validation_metrics=validation_metrics,
+        )
+        generated_plans = personalize_asset_plans(profile_input, watchlist, edge_table)
+        save_user_plan_run(int(user["id"]), profile_input, generated_plans)
+        st.session_state.phase32a_personalized_plans = generated_plans
+        st.success("Personalized paper-research plan saved.")
+
+    active_plans = generated_plans
+    if active_plans.empty:
+        session_plans = st.session_state.get("phase32a_personalized_plans")
+        active_plans = session_plans if isinstance(session_plans, pd.DataFrame) else pd.DataFrame()
+    if active_plans.empty:
+        active_plans = load_latest_user_plan(int(user["id"]))
+
+    render_section_header(
+        "Latest saved plan",
+        "Plain-language research guidance only; every blocker and missing evidence item remains visible.",
+    )
+    if active_plans.empty:
+        render_empty_state(
+            "No personalized plan saved yet",
+            "Complete the profile and select Generate Personalized Plan to create a paper-research plan.",
+        )
+    else:
+        plan_types = active_plans["PlanType"].astype(str)
+        render_metric_grid([
+            {"title": "Total Assets", "value": len(active_plans), "subtitle": "In the latest saved plan", "status": "neutral"},
+            {"title": "Paper Track", "value": int(plan_types.eq("Paper Track").sum()), "subtitle": "Simulation only", "status": "positive"},
+            {"title": "Hold / Watch", "value": int(plan_types.isin(["Hold Existing Only", "Watchlist Only"]).sum()), "subtitle": "Monitoring plans", "status": "info"},
+            {"title": "Passive Preferred", "value": int(plan_types.eq("Passive Benchmark Preferred").sum()), "subtitle": "Active evidence is weaker", "status": "warning"},
+            {"title": "Blocked / Avoid", "value": int(plan_types.eq("Blocked / Avoid for Now").sum()), "subtitle": "Research blocker remains", "status": "critical"},
+        ])
+        visible_columns = [
+            "Asset", "PlanType", "Direction", "GoalFit", "RiskFit", "EvidenceGrade",
+            "EdgeStatus", "PersonalizedPlan", "WhatToMonitor", "RequiredBeforeAction", "ReviewWhen",
+        ]
+        st.dataframe(active_plans[visible_columns], width="stretch", hide_index=True)
+
+        card_candidates = []
+        paper_rows = active_plans.loc[plan_types.eq("Paper Track")]
+        hold_watch_rows = active_plans.loc[plan_types.isin(["Hold Existing Only", "Watchlist Only"])]
+        blocked_rows = active_plans.loc[plan_types.eq("Blocked / Avoid for Now")]
+        if not paper_rows.empty:
+            card_candidates.append(("Best paper-track candidate", paper_rows.iloc[0]))
+        if not hold_watch_rows.empty:
+            card_candidates.append(("Best hold/watch plan", hold_watch_rows.iloc[0]))
+        if not blocked_rows.empty:
+            card_candidates.append(("Most important blocked asset", blocked_rows.iloc[0]))
+        if card_candidates:
+            render_section_header("Useful plan highlights", "These labels organize research; they are not trading recommendations.")
+            card_columns = st.columns(len(card_candidates))
+            for column, (label, plan) in zip(card_columns, card_candidates):
+                with column:
+                    with st.container(border=True):
+                        st.caption(label)
+                        st.markdown(f"#### {plan.get('Asset', 'Asset')}")
+                        st.markdown(f"**Plan:** {plan.get('PlanType', '')}")
+                        st.write(str(plan.get("PersonalizedPlan", "")))
+                        st.markdown(f"**Review:** {plan.get('ReviewWhen', '')}")
+
+        render_download_buttons({
+            "Personalized research plan": (active_plans, "personalized_research_plan.csv"),
+        })
+
+    plan_runs = list_user_plan_runs(int(user["id"]))
+    render_section_header("Previous plan runs", "Saved locally for the demo user so research can be reviewed over time.")
+    if plan_runs.empty:
+        st.info("No previous plan runs are saved yet.")
+    else:
+        st.dataframe(plan_runs, width="stretch", hide_index=True)
+
+
 @st.cache_data(show_spinner=False)
 def build_features(df: pd.DataFrame, target_col: str = DEFAULT_TARGET_COLUMN) -> pd.DataFrame:
     prefix = _target_prefix(target_col)
@@ -1141,6 +1378,7 @@ PRIMARY_PRODUCT_PAGES = [
     "Market Research Assistant",
     "Candidate Watchlist",
     "Evidence of Edge",
+    "User Goals & Saved Plans",
     "Asset Plans",
     "Forecast Explorer",
     "Cost-Aware Plan",
@@ -1436,6 +1674,16 @@ elif page == "Evidence of Edge":
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
 
     _render_evidence_of_edge_section(phase29_snapshot)
+
+
+elif page == "User Goals & Saved Plans":
+    render_hero_section(
+        "Demo user mode",
+        "User Goals & Saved Plans",
+        "Create a personalized paper-research plan without needing to understand every quant metric.",
+    )
+    render_disclaimer_banner()
+    _render_user_goals_saved_plans()
 
 
 elif page == "Paper Research Journey":

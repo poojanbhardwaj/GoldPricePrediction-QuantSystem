@@ -22,6 +22,8 @@ data/raw/
 data/processed/
 data/interim/
 data/external/
+data/*.db
+data/*.db-*
 
 # Model artifacts / training outputs
 models/
