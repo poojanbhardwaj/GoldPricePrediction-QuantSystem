@@ -282,6 +282,29 @@ def _load_phase29_table(filename: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
+    """Return whether a Phase 29 snapshot contains at least one saved prediction."""
+    required = {"Asset", "PredictedPrice", "PredictedMovePct"}
+    if not isinstance(frame, pd.DataFrame) or frame.empty or not required.issubset(frame.columns):
+        return False
+    predicted_price = pd.to_numeric(frame["PredictedPrice"], errors="coerce")
+    predicted_move = pd.to_numeric(frame["PredictedMovePct"], errors="coerce")
+    return bool(predicted_price.notna().any() or predicted_move.notna().any())
+
+
+def _get_phase29_snapshot() -> pd.DataFrame:
+    """Load the freshest valid Phase 29 snapshot from memory, then saved artifacts."""
+    report = st.session_state.get("phase29_user_report")
+    if isinstance(report, dict):
+        session_snapshot = report.get("AllAssetPredictionSnapshot")
+        if _has_real_phase29_predictions(session_snapshot):
+            return session_snapshot.copy()
+    saved_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+    if _has_real_phase29_predictions(saved_snapshot):
+        return saved_snapshot.copy()
+    return pd.DataFrame()
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _latest_user_price_snapshot() -> pd.DataFrame:
     return get_latest_asset_prices(_load_cached_market_history())
@@ -905,17 +928,14 @@ if page == "Market Research Assistant":
                     st.warning(warning)
                 st.write("Saving snapshot")
                 run_status.update(label="Final research snapshot ready", state="complete", expanded=False)
+                st.session_state.phase29_snapshot_ready = True
+                st.rerun()
             except Exception as exc:
                 st.warning(f"Some research evidence could not be combined: {exc}")
                 run_status.update(label="Completed with missing evidence", state="error", expanded=True)
 
-    phase29_report = st.session_state.get("phase29_user_report")
-    phase29_snapshot = (
-        phase29_report.get("AllAssetPredictionSnapshot", pd.DataFrame())
-        if isinstance(phase29_report, dict)
-        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
-    )
-    if not isinstance(phase29_snapshot, pd.DataFrame) or phase29_snapshot.empty:
+    phase29_snapshot = _get_phase29_snapshot()
+    if not _has_real_phase29_predictions(phase29_snapshot):
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
     _render_phase29_snapshot(phase29_snapshot)
     hero_generate_clicked = False
@@ -1403,7 +1423,7 @@ elif page == "Asset Plans":
             detail_choice = st.selectbox("Beginner plan detail", detail_options, key="phase29_asset_plan_detail")
             detail_index = detail_options.index(detail_choice)
             detail_row = display_asset_plans.iloc[detail_index].to_dict()
-            saved_final = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+            saved_final = _get_phase29_snapshot()
             final_match = saved_final[
                 saved_final["Asset"].astype(str).eq(str(detail_row.get("Asset")))
                 & pd.to_numeric(saved_final["BestHorizon"], errors="coerce").eq(int(detail_row.get("Horizon", 0)))
@@ -1504,12 +1524,7 @@ elif page == "Forecast Explorer":
         row = current_plan.iloc[0]
         render_status_card("Current research status", row.get("Status", "Not Enough Evidence"), row.get("Summary", ""), _status_card_style(str(row.get("Status", ""))))
 
-    final_report = st.session_state.get("phase29_user_report")
-    final_snapshot = (
-        final_report.get("AllAssetPredictionSnapshot", pd.DataFrame())
-        if isinstance(final_report, dict)
-        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
-    )
+    final_snapshot = _get_phase29_snapshot()
     matching_final = final_snapshot[final_snapshot["Asset"].astype(str).eq(explorer_asset)] if isinstance(final_snapshot, pd.DataFrame) and not final_snapshot.empty else pd.DataFrame()
     if not matching_final.empty and int(matching_final.iloc[0].get("BestHorizon", 0) or 0) == int(explorer_horizon):
         render_prediction_snapshot_card(matching_final.iloc[0].to_dict())
@@ -1551,12 +1566,7 @@ elif page == "Cost-Aware Plan":
     render_disclaimer_banner()
     st.info(COST_DISCLAIMER)
 
-    saved_snapshot = st.session_state.get("phase29_user_report")
-    cost_snapshot = (
-        saved_snapshot.get("AllAssetPredictionSnapshot", pd.DataFrame())
-        if isinstance(saved_snapshot, dict)
-        else _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
-    )
+    cost_snapshot = _get_phase29_snapshot()
     asset_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = _load_phase26_table("phase26_asset_plans")
@@ -1668,7 +1678,7 @@ elif page == "Portfolio Summary":
         portfolio_plans = rank_asset_plans(portfolio_plans)
         portfolio_summary = generate_portfolio_plan(portfolio_plans)
         summary = portfolio_summary.iloc[0]
-        final_portfolio_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+        final_portfolio_snapshot = _get_phase29_snapshot()
         if not final_portfolio_snapshot.empty:
             render_section_header("Current market snapshot", "Latest available prices with final cost and benchmark context.")
             render_market_snapshot_grid(

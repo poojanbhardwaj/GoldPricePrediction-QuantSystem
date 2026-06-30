@@ -20,9 +20,20 @@ _STATUS_STYLES = {
     "not enough evidence": "warning",
 }
 
+_DISPLAY_LABELS = {
+    "ExpectedDelay": "Recent data delay",
+    "MissingEstimate": "Estimate unavailable",
+    "Not Enough Evidence": "Insufficient evidence",
+}
+
 
 def _safe(value: Any) -> str:
     return escape(str(value if value is not None else ""))
+
+
+def _display_label(value: Any) -> str:
+    text = str(value if value is not None else "")
+    return _DISPLAY_LABELS.get(text, text)
 
 
 def _slug(value: Any) -> str:
@@ -222,7 +233,7 @@ def render_hero_section(pill: str, headline: str, subheadline: str) -> None:
 
 def render_status_badge(status: Any) -> None:
     style = _STATUS_STYLES.get(str(status).casefold(), "neutral")
-    st.markdown(f'<span class="status-badge {style}">{_safe(status)}</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="status-badge {style}">{_safe(_display_label(status))}</span>', unsafe_allow_html=True)
 
 
 def render_confidence_badge(confidence: Any) -> None:
@@ -244,7 +255,8 @@ def render_status_card(title: str, value: Any, subtitle: str = "", status: str =
     status_name = status if status in {"neutral", "positive", "warning", "critical", "info"} else "neutral"
     st.markdown(
         f'<div class="ui-status-card {status_name}"><div class="title">{_safe(title)}</div>'
-        f'<div class="value">{_safe(value)}</div><div class="subtitle">{_safe(subtitle)}</div></div>',
+        f'<div class="value">{_safe(_display_label(value))}</div>'
+        f'<div class="subtitle">{_safe(_display_label(subtitle))}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -306,7 +318,7 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
     st.markdown(
         f'<article class="asset-plan-card"><div class="card-top"><div><h3>{_safe(row.get("Asset", "Asset"))} · '
         f'{_safe(row.get("Horizon", ""))}D</h3><div class="rank">Closest-to-track rank #{_safe(rank)}</div></div>'
-        f'<div><span class="status-badge {style}">{_safe(status)}</span> '
+        f'<div><span class="status-badge {style}">{_safe(_display_label(status))}</span> '
         f'<span class="confidence-badge">{_safe(row.get("Confidence", "Low"))} confidence</span> '
         f'<span class="priority-badge {_slug(priority)}">{_safe(priority)} recheck</span></div></div>'
         f'<div class="opportunity-score"><span class="score">{score:.0f}</span><span class="track">'
@@ -325,7 +337,7 @@ def render_opportunity_card(plan: Mapping[str, Any]) -> None:
     st.markdown(
         f'<div class="opportunity-card"><h3>#{_safe(row.get("ClosestToTrackRank", row.get("PlanRank", "-")))} '
         f'{_safe(row.get("Asset", "Asset"))} · {_safe(row.get("Horizon", ""))}D</h3>'
-        f'<p>Opportunity score {_safe(row.get("OpportunityScore", 0))}/100 · {_safe(row.get("Status", ""))} · '
+        f'<p>Opportunity score {_safe(row.get("OpportunityScore", 0))}/100 · {_safe(_display_label(row.get("Status", "")))} · '
         f'{_safe(row.get("PositiveEvidence", "No confirmed positive evidence yet."))}</p>'
         f'<p><strong>Blocking:</strong> {_safe(row.get("WhyNotTrackYet", row.get("MainRisk", "")))}</p>'
         f'<p><strong>Improve:</strong> {_safe(row.get("WhatMustImprove", row.get("ImprovementNeeded", "")))}</p>'
@@ -401,16 +413,16 @@ def render_asset_price_card(row: Mapping[str, Any]) -> None:
     move = _fmt_number(data.get("PredictedMovePct"), suffix="%", missing="No saved estimate")
     st.markdown(
         f'<article class="asset-price-card"><div class="card-top"><span class="asset-name">{_safe(data.get("Asset", "Asset"))}</span>'
-        f'<span class="status-badge {style}">{_safe(status)}</span></div>'
+        f'<span class="status-badge {style}">{_safe(_display_label(status))}</span></div>'
         f'<div class="latest-price">{price}</div><div class="as-of">{_safe(data.get("LatestPriceDate", "No date"))} · '
-        f'{_safe(data.get("DataFreshness", "Unknown"))}</div>'
+        f'{_safe(_display_label(data.get("DataFreshness", "Unknown")))}</div>'
         f'<div class="number-strip"><div><span>1D change</span><strong>{_fmt_number(data.get("Change1D_pct"), suffix="%")}</strong></div>'
         f'<div><span>5D change</span><strong>{_fmt_number(data.get("Change5D_pct"), suffix="%")}</strong></div>'
         f'<div><span>30D change</span><strong>{_fmt_number(data.get("Change30D_pct"), suffix="%")}</strong></div></div>'
         f'<div class="number-strip"><div><span>Predicted price</span><strong>{predicted}</strong></div>'
         f'<div><span>Predicted move</span><strong>{move}</strong></div>'
         f'<div><span>Opportunity</span><strong>{score}</strong></div></div>'
-        f'<div class="card-foot"><span>{_safe(data.get("CostVerdict", "Cost estimate pending"))}</span>'
+        f'<div class="card-foot"><span>{_safe(_display_label(data.get("CostVerdict", "Cost estimate pending")))}</span>'
         f'<span>{_safe(data.get("PassiveBenchmarkName", "Passive benchmark pending"))}</span></div></article>',
         unsafe_allow_html=True,
     )
@@ -432,7 +444,7 @@ def render_cost_summary_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
     missing_active = str(data.get("ActiveEstimateExplanation", "Run Full Research first to generate an active estimate."))
     st.markdown(
-        f'<div class="cost-summary-card"><h3>Cost reality · {_safe(data.get("CostVerdict", "MissingEstimate"))}</h3>'
+        f'<div class="cost-summary-card"><h3>Cost reality · {_safe(_display_label(data.get("CostVerdict", "MissingEstimate")))}</h3>'
         f'<div class="number-strip"><div><span>Cost drag</span><strong>{_fmt_number(data.get("CostDragPct"), suffix="%")}</strong></div>'
         f'<div><span>Break-even</span><strong>{_fmt_number(data.get("BreakEvenReturnPct"), suffix="%")}</strong></div>'
         f'<div><span>Net active</span><strong>{_fmt_number(data.get("NetActiveEstimatePct"), suffix="%", missing=missing_active)}</strong></div></div>'
