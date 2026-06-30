@@ -75,6 +75,7 @@ from src.final_user_dashboard import (
     run_full_user_research,
     set_plan_navigation_state,
 )
+from src.candidate_watchlist import build_candidate_watchlist, summarize_watchlist
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
     train_directional_models,
@@ -579,6 +580,79 @@ def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
     })
 
 
+def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> None:
+    render_section_header(
+        "Candidate Watchlist & Opportunity Tracker",
+        "Saved predictions are ranked through transparent score, cost, risk, and move-size gates. This is not a trading recommendation.",
+    )
+    if not _has_real_phase29_predictions(prediction_snapshot):
+        render_empty_state(
+            "No candidate rankings",
+            "No saved research snapshot is available yet. Run Full Research to build candidate rankings.",
+        )
+        return
+
+    report = st.session_state.get("phase29_user_report")
+    cost_plans = report.get("CostAwarePlans") if isinstance(report, dict) else None
+    if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+        cost_plans = report.get("CostAwareAssetPlans") if isinstance(report, dict) else None
+    if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+        cost_plans = _load_phase29_table("phase29_cost_aware_asset_plans.csv")
+
+    final_user_plans = report.get("FinalUserPlans") if isinstance(report, dict) else None
+    if not isinstance(final_user_plans, pd.DataFrame) or final_user_plans.empty:
+        final_user_plans = _load_phase29_table("phase29_final_user_plans.csv")
+
+    watchlist = build_candidate_watchlist(
+        prediction_snapshot,
+        cost_plans=cost_plans,
+        final_user_plans=final_user_plans,
+    )
+    if watchlist.empty:
+        render_empty_state(
+            "No candidate rankings",
+            "No saved research snapshot is available yet. Run Full Research to build candidate rankings.",
+        )
+        return
+
+    summary = summarize_watchlist(watchlist)
+    render_metric_grid([
+        {"title": "Total Assets", "value": summary["total_assets"], "subtitle": "Ranked from saved research", "status": "neutral"},
+        {"title": "Actionable", "value": summary["actionable_count"], "subtitle": "Still requires confirmation", "status": "positive"},
+        {"title": "Watchlist", "value": summary["watchlist_count"], "subtitle": "Blocked from stronger classification", "status": "info"},
+        {"title": "Bearish Watchlist", "value": summary["bearish_watchlist_count"], "subtitle": "Downside monitoring only", "status": "warning"},
+        {"title": "Blocked / Avoid", "value": summary["blocked_count"], "subtitle": "Includes insufficient evidence", "status": "critical"},
+    ])
+
+    table_columns = [
+        "Asset", "Category", "Direction", "PredictedMovePct", "PredictedPrice",
+        "BestHorizon", "OpportunityScore", "Status", "CostVerdict", "Reason", "UpgradeTrigger",
+    ]
+    st.dataframe(watchlist[table_columns], width="stretch", hide_index=True)
+
+    render_section_header(
+        "Top-ranked candidates",
+        "Ranking keeps blockers visible and does not override the saved risk status.",
+    )
+    top_candidates = watchlist.head(3)
+    columns = st.columns(len(top_candidates))
+    for column, (_, candidate) in zip(columns, top_candidates.iterrows()):
+        move = pd.to_numeric(pd.Series([candidate.get("PredictedMovePct")]), errors="coerce").iloc[0]
+        move_label = "Estimate unavailable" if pd.isna(move) else f"{float(move):+.2f}%"
+        with column:
+            with st.container(border=True):
+                st.markdown(f"#### {candidate.get('Asset', 'Asset')}")
+                st.caption(f"{candidate.get('Category')} · {candidate.get('Direction')}")
+                st.markdown(f"**Opportunity score:** {float(candidate.get('OpportunityScore', 0)):.1f}/100")
+                st.markdown(f"**Predicted move:** {move_label}")
+                st.write(str(candidate.get("Reason", "")))
+                st.markdown(f"**Upgrade trigger:** {candidate.get('UpgradeTrigger', '')}")
+
+    render_download_buttons({
+        "Candidate watchlist": (watchlist, "phase30_candidate_watchlist.csv"),
+    })
+
+
 @st.cache_data(show_spinner=False)
 def build_features(df: pd.DataFrame, target_col: str = DEFAULT_TARGET_COLUMN) -> pd.DataFrame:
     prefix = _target_prefix(target_col)
@@ -1064,6 +1138,7 @@ if page == "Market Research Assistant":
     if not _has_real_phase29_predictions(phase29_snapshot):
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
     _render_phase29_snapshot(phase29_snapshot)
+    _render_candidate_watchlist_section(phase29_snapshot)
     hero_generate_clicked = False
 
     render_glass_container(
@@ -1204,7 +1279,7 @@ elif page == "Paper Research Journey":
     st.markdown("# Build trust through paper research")
 
 
-    st.caption("Track ideas safely, compare them against passive benchmarks, and learn when the system is useful â€” without real-money decisions.")
+    st.caption("Track ideas safely, compare them against passive benchmarks, and learn when the system is useful ? without real-money decisions.")
 
 
     st.info("This is a research assistant, not financial advice. It does not execute trades or approve real-money decisions.")
@@ -1321,7 +1396,7 @@ elif page == "Paper Research Journey":
                 top = st.columns([1.2, 0.8, 0.8, 1.2])
 
 
-                top[0].markdown(f"### {row.get('Asset')} Â· {row.get('Horizon')}")
+                top[0].markdown(f"### {row.get('Asset')} ? {row.get('Horizon')}")
 
 
                 top[1].metric("Opportunity", row.get("OpportunityScore", 0))
@@ -1428,7 +1503,7 @@ elif page == "Paper Research Journey":
         for plan in active:
 
 
-            with st.expander(f"{plan.get('Asset')} Â· {plan.get('Horizon')} Â· {plan.get('PlanId')}"):
+            with st.expander(f"{plan.get('Asset')} ? {plan.get('Horizon')} ? {plan.get('PlanId')}"):
 
 
                 st.write(f"**Status at start:** {plan.get('StatusAtStart')}")
@@ -1462,7 +1537,7 @@ elif page == "Paper Research Journey":
     for guide in guides:
 
 
-        with st.expander(f"{guide['Asset']} â€” {guide['PassiveBenchmarkName']}"):
+        with st.expander(f"{guide['Asset']} ? {guide['PassiveBenchmarkName']}"):
 
 
             st.write(guide["Explanation"])

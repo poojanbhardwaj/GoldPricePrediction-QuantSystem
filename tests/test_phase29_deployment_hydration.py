@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -11,6 +12,8 @@ from streamlit.testing.v1 import AppTest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from src.ui_components import render_research_launch_panel, render_run_research_panel
 
 
 def _app_function(name: str, namespace: dict):
@@ -62,6 +65,27 @@ def test_phase29_loader_reads_checked_in_csv_and_handles_missing_file(tmp_path):
         load_table("phase29_all_asset_prediction_snapshot.csv"), expected
     )
     assert load_table("missing.csv").empty
+
+
+def test_research_launch_panel_accepts_snapshot_source_positionally():
+    parameter = inspect.signature(render_research_launch_panel).parameters["snapshot_source"]
+    assert parameter.default == "missing"
+    assert render_run_research_panel is render_research_launch_panel
+
+    with patch("src.ui_components.st.markdown") as markdown:
+        render_run_research_panel("saved")
+        saved_html = str(markdown.call_args.args[0])
+        assert (
+            "Showing saved research snapshot from the latest checked-in demo run. "
+            "Click Run Full Research to refresh it in this session."
+        ) in saved_html
+
+        render_run_research_panel("session")
+        default_html = str(markdown.call_args.args[0])
+        assert (
+            "Prices, forecasts, risk, benchmarks, costs, scores, and simple plans are combined "
+            "after you start the run."
+        ) in default_html
 
 
 def test_deployment_demo_artifacts_are_narrowly_allowlisted():
@@ -126,4 +150,3 @@ def test_clean_session_hydrates_saved_research_and_phase29_fallback_views():
     assert "Average opportunity score" in portfolio_content
     assert "Highest opportunity asset" in portfolio_content
     assert "No portfolio summary" not in portfolio_content
-
