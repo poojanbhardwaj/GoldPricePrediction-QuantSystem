@@ -315,6 +315,19 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
         f'<div class="plan-detail"><span>{_safe(label)}</span><p>{_safe(value)}</p></div>'
         for label, value in details
     )
+    has_saved_prediction = pd.to_numeric(
+        pd.Series([row.get("PredictedPrice"), row.get("PredictedMovePct")]), errors="coerce"
+    ).notna().any()
+    prediction_html = ""
+    if has_saved_prediction:
+        prediction_html = (
+            '<div class="number-strip">'
+            f'<div><span>Saved horizon</span><strong>{_safe(row.get("BestHorizon", row.get("Horizon", "")))}D</strong></div>'
+            f'<div><span>Predicted price</span><strong>{_fmt_number(row.get("PredictedPrice"), missing="Estimate unavailable")}</strong></div>'
+            f'<div><span>Predicted move</span><strong>{_fmt_number(row.get("PredictedMovePct"), suffix="%", missing="Estimate unavailable")}</strong></div>'
+            f'<div><span>Cost status</span><strong>{_safe(_display_label(row.get("CostVerdict", "MissingEstimate")))}</strong></div>'
+            '</div>'
+        )
     st.markdown(
         f'<article class="asset-plan-card"><div class="card-top"><div><h3>{_safe(row.get("Asset", "Asset"))} · '
         f'{_safe(row.get("Horizon", ""))}D</h3><div class="rank">Closest-to-track rank #{_safe(rank)}</div></div>'
@@ -324,6 +337,7 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
         f'<div class="opportunity-score"><span class="score">{score:.0f}</span><span class="track">'
         f'<span class="fill" style="display:block;width:{score:.1f}%"></span></span>'
         f'<span class="grade">Grade {_safe(row.get("OpportunityGrade", "-"))}</span></div>'
+        f'{prediction_html}'
         f'<p class="summary">{_safe(row.get("Summary", "No summary is available."))}</p>'
         f'<div class="plan-grid">{detail_html}</div></article>',
         unsafe_allow_html=True,
@@ -491,10 +505,22 @@ def render_simple_plan_card(row: Mapping[str, Any]) -> None:
     )
 
 
-def render_research_launch_panel() -> None:
+def render_research_launch_panel(snapshot_source: str = "missing") -> None:
+    if snapshot_source == "session":
+        message = "Showing research results generated in this session. Run Full Research again only when you want to refresh them."
+    elif snapshot_source == "saved":
+        message = (
+            "Showing saved research snapshot from the latest checked-in demo run. "
+            "Click Run Full Research to refresh it in this session."
+        )
+    else:
+        message = (
+            "No saved research snapshot is available. Click Run Full Research to combine prices, forecasts, "
+            "risk, passive comparisons, costs, scores, and simple plans."
+        )
     st.markdown(
         '<div class="run-research-panel"><div><h3>Build the complete user snapshot</h3>'
-        '<p>Prices, saved forecasts, risk, passive comparisons, costs, scores, and simple plans are combined only after you start the run.</p></div>'
+        f'<p>{_safe(message)}</p></div>'
         '<div class="steps">Prices → forecasts → risk → benchmarks → costs → plans</div></div>',
         unsafe_allow_html=True,
     )

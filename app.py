@@ -269,11 +269,39 @@ def _load_phase26_table(artifact_name: str) -> pd.DataFrame:
         table = load_latest_artifact(PHASE26_PRODUCT_EXPERIENCE, artifact_name, required=False)
     except Exception:
         table = None
-    return table if isinstance(table, pd.DataFrame) else pd.DataFrame()
+    if isinstance(table, pd.DataFrame) and not table.empty:
+        return table.copy()
+
+    artifact_stem = Path(str(artifact_name)).stem
+    artifact_dir = (
+        Path(__file__).resolve().parent
+        / "artifacts"
+        / "latest"
+        / PHASE26_PRODUCT_EXPERIENCE
+    )
+    candidate_names = [artifact_stem, _safe_filename_part(artifact_stem)]
+    for candidate_name in dict.fromkeys(candidate_names):
+        path = artifact_dir / f"{candidate_name}.csv"
+        if not path.exists():
+            continue
+        try:
+            direct_table = pd.read_csv(path)
+        except Exception:
+            continue
+        if not direct_table.empty:
+            return direct_table
+    return pd.DataFrame()
 
 
 def _load_phase29_table(filename: str) -> pd.DataFrame:
-    path = Path(__file__).resolve().parent / "artifacts" / "latest" / PHASE29_FINAL_USER_EXPERIENCE / filename
+    safe_filename = Path(str(filename)).name
+    path = (
+        Path(__file__).resolve().parent
+        / "artifacts"
+        / "latest"
+        / PHASE29_FINAL_USER_EXPERIENCE
+        / safe_filename
+    )
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -303,6 +331,88 @@ def _get_phase29_snapshot() -> pd.DataFrame:
     if _has_real_phase29_predictions(saved_snapshot):
         return saved_snapshot.copy()
     return pd.DataFrame()
+
+
+def _phase29_snapshot_as_asset_plans(snapshot: pd.DataFrame) -> pd.DataFrame:
+    """Build display-only plan rows from a valid saved Phase 29 snapshot."""
+    if not _has_real_phase29_predictions(snapshot):
+        return pd.DataFrame()
+    source = snapshot.copy()
+    horizon_source = (
+        source["BestHorizon"]
+        if "BestHorizon" in source.columns
+        else source.get("Horizon", pd.Series(0, index=source.index))
+    )
+    source["Horizon"] = pd.to_numeric(horizon_source, errors="coerce").fillna(0).astype(int)
+    source["UserPlan"] = source.get("SimplePlan", pd.Series("", index=source.index)).fillna("")
+    source["Summary"] = source["UserPlan"]
+    source["Why"] = source["UserPlan"]
+    source["WhatToWatch"] = source.get(
+        "WhatToMonitorNext", pd.Series("Review the next saved evidence update.", index=source.index)
+    )
+    ranked = rank_asset_plans(source)
+    return _enrich_plans_with_phase29_predictions(ranked, source)
+
+
+def _enrich_plans_with_phase29_predictions(
+    plans: pd.DataFrame,
+    snapshot: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach saved Phase 29 display fields after core plan ranking."""
+    if not isinstance(plans, pd.DataFrame) or plans.empty or not isinstance(snapshot, pd.DataFrame) or snapshot.empty:
+        return plans.copy() if isinstance(plans, pd.DataFrame) else pd.DataFrame()
+    source = snapshot.copy()
+    if "Horizon" not in source.columns:
+        source["Horizon"] = pd.to_numeric(
+            source.get("BestHorizon", pd.Series(0, index=source.index)), errors="coerce"
+        ).fillna(0).astype(int)
+    extra_columns = [
+        column for column in (
+            "Asset", "Horizon", "BestHorizon", "LatestPrice", "PredictedPrice",
+            "PredictedMovePct", "CostVerdict", "SimplePlan", "CostDragPct",
+            "NetActiveEstimatePct", "NetPassiveEstimatePct",
+        ) if column in source.columns
+    ]
+    extras = source[extra_columns].drop_duplicates(["Asset", "Horizon"], keep="first")
+    display_fields = [column for column in extra_columns if column not in {"Asset", "Horizon"}]
+    base = plans.drop(columns=[column for column in display_fields if column in plans.columns], errors="ignore")
+    return base.merge(extras, on=["Asset", "Horizon"], how="left")
+
+
+def _hydrate_saved_research_state() -> None:
+    """Hydrate empty Streamlit state from checked-in research demo artifacts."""
+    phase29_snapshot = _get_phase29_snapshot()
+    phase29_plans = _load_phase29_table("phase29_final_user_plans.csv")
+    phase29_cost_plans = _load_phase29_table("phase29_cost_aware_asset_plans.csv")
+    phase26_asset_plans = _load_phase26_table("phase26_asset_plans")
+    phase26_portfolio_plan = _load_phase26_table("phase26_portfolio_plan")
+    phase26_research_snapshot = _load_phase26_table("phase26_research_snapshot")
+
+    existing_report = st.session_state.get("phase29_user_report")
+    existing_snapshot = (
+        existing_report.get("AllAssetPredictionSnapshot")
+        if isinstance(existing_report, dict)
+        else None
+    )
+    if not _has_real_phase29_predictions(existing_snapshot) and _has_real_phase29_predictions(phase29_snapshot):
+        hydrated_report = dict(existing_report) if isinstance(existing_report, dict) else {}
+        hydrated_report["AllAssetPredictionSnapshot"] = phase29_snapshot
+        if not phase29_plans.empty:
+            hydrated_report["FinalUserPlans"] = phase29_plans
+        if not phase29_cost_plans.empty:
+            hydrated_report["CostAwarePlans"] = phase29_cost_plans
+            hydrated_report["CostAwareAssetPlans"] = phase29_cost_plans
+        hydrated_report["SnapshotSource"] = "Checked-in saved research demo"
+        st.session_state.phase29_user_report = hydrated_report
+
+    for state_key, table in (
+        ("phase26_asset_plans", phase26_asset_plans),
+        ("phase26_portfolio_plan", phase26_portfolio_plan),
+        ("phase26_research_snapshot", phase26_research_snapshot),
+    ):
+        current = st.session_state.get(state_key)
+        if (not isinstance(current, pd.DataFrame) or current.empty) and not table.empty:
+            st.session_state[state_key] = table
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -734,6 +844,10 @@ if "phase5_audit" not in st.session_state:
 if "phase5_features_preview" not in st.session_state:
     st.session_state.phase5_features_preview = None
 
+if not st.session_state.get("saved_research_state_hydrated", False):
+    _hydrate_saved_research_state()
+    st.session_state.saved_research_state_hydrated = True
+
 
 # ════════════════════════════════════════════════════════════════
 # Sidebar Navigation
@@ -906,7 +1020,19 @@ if page == "Market Research Assistant":
             args=(selected_asset, "Paper Research Journey", int(selected_horizon)),
         )
 
-    render_run_research_panel()
+    initial_phase29_snapshot = _get_phase29_snapshot()
+    initial_phase29_report = st.session_state.get("phase29_user_report")
+    if isinstance(initial_phase29_report, dict) and initial_phase29_report.get("SnapshotSource") == "Checked-in saved research demo":
+        launch_snapshot_source = "saved"
+    elif isinstance(initial_phase29_report, dict) and _has_real_phase29_predictions(
+        initial_phase29_report.get("AllAssetPredictionSnapshot")
+    ):
+        launch_snapshot_source = "session"
+    elif _has_real_phase29_predictions(initial_phase29_snapshot):
+        launch_snapshot_source = "saved"
+    else:
+        launch_snapshot_source = "missing"
+    render_run_research_panel(launch_snapshot_source)
     if run_full_clicked or refresh_market_clicked:
         with st.status("Building the final research snapshot...", expanded=True) as run_status:
             for step in (
@@ -1362,6 +1488,8 @@ elif page == "Asset Plans":
     asset_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = _load_phase26_table("phase26_asset_plans")
+    if not isinstance(asset_plans, pd.DataFrame) or asset_plans.empty:
+        asset_plans = _phase29_snapshot_as_asset_plans(_get_phase29_snapshot())
     portfolio_plan = st.session_state.get("phase26_portfolio_plan")
     if not isinstance(portfolio_plan, pd.DataFrame):
         portfolio_plan = _load_phase26_table("phase26_portfolio_plan")
@@ -1372,6 +1500,9 @@ elif page == "Asset Plans":
         )
     else:
         ranked_plans = rank_asset_plans(asset_plans)
+        ranked_plans = _enrich_plans_with_phase29_predictions(
+            ranked_plans, _get_phase29_snapshot()
+        )
         portfolio_plan = generate_portfolio_plan(ranked_plans)
         filter_choice = render_status_tabs(
             ["All", "Closest to Track", "Watch", "Wait", "High Risk", "Data Issues"],
@@ -1570,6 +1701,8 @@ elif page == "Cost-Aware Plan":
     asset_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = _load_phase26_table("phase26_asset_plans")
+    if not isinstance(asset_plans, pd.DataFrame) or asset_plans.empty:
+        asset_plans = _phase29_snapshot_as_asset_plans(_get_phase29_snapshot())
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = pd.DataFrame()
 
@@ -1672,19 +1805,37 @@ elif page == "Portfolio Summary":
     portfolio_summary = st.session_state.get("phase26_portfolio_plan")
     if not isinstance(portfolio_summary, pd.DataFrame):
         portfolio_summary = _load_phase26_table("phase26_portfolio_plan")
-    if portfolio_plans.empty or portfolio_summary.empty:
-        render_empty_state("No portfolio summary", "Generate a research plan first so the assistant can summarize the saved cross-asset evidence.")
-    else:
+    final_portfolio_snapshot = _get_phase29_snapshot()
+    if not isinstance(portfolio_plans, pd.DataFrame) or portfolio_plans.empty:
+        portfolio_plans = _phase29_snapshot_as_asset_plans(final_portfolio_snapshot)
+    if isinstance(portfolio_plans, pd.DataFrame) and not portfolio_plans.empty:
         portfolio_plans = rank_asset_plans(portfolio_plans)
         portfolio_summary = generate_portfolio_plan(portfolio_plans)
+    if (not isinstance(portfolio_plans, pd.DataFrame) or portfolio_plans.empty) and not _has_real_phase29_predictions(final_portfolio_snapshot):
+        render_empty_state("No portfolio summary", "Generate a research plan first so the assistant can summarize the saved cross-asset evidence.")
+    else:
         summary = portfolio_summary.iloc[0]
-        final_portfolio_snapshot = _get_phase29_snapshot()
         if not final_portfolio_snapshot.empty:
             render_section_header("Current market snapshot", "Latest available prices with final cost and benchmark context.")
             render_market_snapshot_grid(
                 final_portfolio_snapshot,
                 on_view_plan=lambda asset, horizon: _navigate_to_plan(asset, "Asset Plans", horizon),
             )
+            opportunity_scores = pd.to_numeric(
+                final_portfolio_snapshot.get("OpportunityScore", pd.Series(np.nan, index=final_portfolio_snapshot.index)),
+                errors="coerce",
+            )
+            cost_drag_values = pd.to_numeric(
+                final_portfolio_snapshot.get("CostDragPct", pd.Series(np.nan, index=final_portfolio_snapshot.index)),
+                errors="coerce",
+            )
+            highest_opportunity = final_portfolio_snapshot.loc[opportunity_scores.idxmax(), "Asset"] if opportunity_scores.notna().any() else "No scored asset"
+            render_metric_grid([
+                {"title": "High Risk assets", "value": int(final_portfolio_snapshot["Status"].eq("High Risk").sum()), "subtitle": "Risk status remains binding", "status": "critical"},
+                {"title": "Average opportunity score", "value": f"{float(opportunity_scores.mean()):.1f}/100" if opportunity_scores.notna().any() else "No saved score", "subtitle": "Research closeness, not expected profit", "status": "info"},
+                {"title": "Highest opportunity asset", "value": str(highest_opportunity), "subtitle": "Still subject to its saved risk status", "status": "warning"},
+                {"title": "Average cost drag", "value": f"{float(cost_drag_values.mean()):.2f}%" if cost_drag_values.notna().any() else "No saved cost estimate", "subtitle": COST_DISCLAIMER, "status": "warning"},
+            ])
             portfolio_gaps = pd.to_numeric(final_portfolio_snapshot.get("ActiveMinusPassiveNetPct"), errors="coerce")
             portfolio_cost_drag = pd.to_numeric(final_portfolio_snapshot.get("CostDragPct"), errors="coerce")
             render_metric_grid([
