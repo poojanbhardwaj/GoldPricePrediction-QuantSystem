@@ -76,6 +76,7 @@ from src.final_user_dashboard import (
     set_plan_navigation_state,
 )
 from src.candidate_watchlist import build_candidate_watchlist, summarize_watchlist
+from src.evidence_of_edge import build_edge_evidence_table, summarize_edge_evidence
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
     train_directional_models,
@@ -653,6 +654,94 @@ def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> No
     })
 
 
+def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
+    if not _has_real_phase29_predictions(prediction_snapshot):
+        render_empty_state(
+            "No edge evidence available",
+            "No saved research snapshot is available yet. Run Full Research before reviewing edge evidence.",
+        )
+        return
+
+    report = st.session_state.get("phase29_user_report")
+    cost_plans = report.get("CostAwarePlans") if isinstance(report, dict) else None
+    if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+        cost_plans = report.get("CostAwareAssetPlans") if isinstance(report, dict) else None
+    if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+        cost_plans = _load_phase29_table("phase29_cost_aware_asset_plans.csv")
+
+    final_user_plans = report.get("FinalUserPlans") if isinstance(report, dict) else None
+    if not isinstance(final_user_plans, pd.DataFrame) or final_user_plans.empty:
+        final_user_plans = _load_phase29_table("phase29_final_user_plans.csv")
+
+    research_snapshot = st.session_state.get("phase26_research_snapshot")
+    if not isinstance(research_snapshot, pd.DataFrame) or research_snapshot.empty:
+        research_snapshot = _load_phase26_table("phase26_research_snapshot")
+
+    watchlist = build_candidate_watchlist(
+        prediction_snapshot,
+        cost_plans=cost_plans,
+        final_user_plans=final_user_plans,
+    )
+    edge_table = build_edge_evidence_table(
+        watchlist,
+        prediction_snapshot=prediction_snapshot,
+        cost_plans=cost_plans,
+        research_snapshot=research_snapshot,
+    )
+    if edge_table.empty:
+        render_empty_state(
+            "No edge evidence available",
+            "No saved research snapshot is available yet. Run Full Research before reviewing edge evidence.",
+        )
+        return
+
+    summary = summarize_edge_evidence(edge_table)
+    render_metric_grid([
+        {"title": "Total Assets", "value": summary["total_assets"], "subtitle": "Reviewed from saved evidence", "status": "neutral"},
+        {"title": "Edge Supported", "value": summary["edge_supported_count"], "subtitle": "Positive benchmark gap plus validation", "status": "positive"},
+        {"title": "Watch Only", "value": summary["watch_only_count"], "subtitle": "Requires validation", "status": "info"},
+        {"title": "Cost Blocked", "value": summary["cost_blocked_count"], "subtitle": "Modeled costs dominate", "status": "critical"},
+        {"title": "Insufficient Evidence", "value": summary["insufficient_evidence_count"], "subtitle": "Missing usable evidence", "status": "warning"},
+    ])
+
+    table_columns = [
+        "Asset", "Category", "Direction", "EdgeStatus", "EvidenceGrade", "OpportunityScore",
+        "PredictedMovePct", "ActiveMinusPassivePct", "CostDragPct", "CostVerdict", "Sharpe",
+        "MaxDrawdownPct", "WinRatePct", "WalkForwardReturnPct", "EvidenceSummary",
+        "RequiredBeforeAction",
+    ]
+    st.dataframe(edge_table[table_columns], width="stretch", hide_index=True)
+
+    visible = edge_table.loc[edge_table["EdgeStatus"].ne("Insufficient Evidence")].copy()
+    if not visible.empty:
+        grade_order = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
+        visible["_grade"] = visible["EvidenceGrade"].map(grade_order).fillna(9)
+        visible["_score"] = pd.to_numeric(visible["OpportunityScore"], errors="coerce").fillna(-1)
+        top_edges = visible.sort_values(["_grade", "_score"], ascending=[True, False]).head(3)
+        render_section_header(
+            "Top edge candidates",
+            "Highest available evidence grades only; every remaining blocker still applies.",
+        )
+        columns = st.columns(len(top_edges))
+        for column, (_, candidate) in zip(columns, top_edges.iterrows()):
+            gap = pd.to_numeric(pd.Series([candidate.get("ActiveMinusPassivePct")]), errors="coerce").iloc[0]
+            drag = pd.to_numeric(pd.Series([candidate.get("CostDragPct")]), errors="coerce").iloc[0]
+            gap_label = "Evidence unavailable" if pd.isna(gap) else f"{float(gap):+.2f}%"
+            drag_label = "Evidence unavailable" if pd.isna(drag) else f"{float(drag):.2f}%"
+            with column:
+                with st.container(border=True):
+                    st.markdown(f"#### {candidate.get('Asset', 'Asset')}")
+                    st.caption(f"{candidate.get('EdgeStatus')} · Grade {candidate.get('EvidenceGrade')}")
+                    st.markdown(f"**Active vs passive:** {gap_label}")
+                    st.markdown(f"**Cost drag:** {drag_label}")
+                    st.markdown(f"**Main risk:** {candidate.get('MainRisk', 'Evidence unavailable')}")
+                    st.markdown(f"**Required before action:** {candidate.get('RequiredBeforeAction', '')}")
+
+    render_download_buttons({
+        "Evidence of edge": (edge_table, "phase31_evidence_of_edge.csv"),
+    })
+
+
 @st.cache_data(show_spinner=False)
 def build_features(df: pd.DataFrame, target_col: str = DEFAULT_TARGET_COLUMN) -> pd.DataFrame:
     prefix = _target_prefix(target_col)
@@ -1004,6 +1093,7 @@ LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
 PRIMARY_PRODUCT_PAGES = [
     "Market Research Assistant",
     "Candidate Watchlist",
+    "Evidence of Edge",
     "Asset Plans",
     "Forecast Explorer",
     "Cost-Aware Plan",
@@ -1284,6 +1374,21 @@ elif page == "Candidate Watchlist":
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
 
     _render_candidate_watchlist_section(phase29_snapshot)
+
+
+elif page == "Evidence of Edge":
+    render_hero_section(
+        "Research evidence only",
+        "Evidence of Edge",
+        "Check whether saved candidates survive benchmark, cost, risk, and validation evidence.",
+    )
+    render_disclaimer_banner()
+
+    phase29_snapshot = _get_phase29_snapshot()
+    if not _has_real_phase29_predictions(phase29_snapshot):
+        phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+
+    _render_evidence_of_edge_section(phase29_snapshot)
 
 
 elif page == "Paper Research Journey":
