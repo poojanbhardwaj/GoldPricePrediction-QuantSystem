@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from src.app_context import get_asset_target
 from src.cost_aware_plan import default_cost_assumptions, generate_cost_aware_asset_plan
 from src.final_user_dashboard import resolve_horizon_estimates, set_plan_navigation_state
+from src.ui_components import _display_label
 
 
 FORBIDDEN = re.compile(
@@ -135,6 +136,53 @@ def test_app_cost_page_has_helpful_states_and_navigation_rerun():
     assert '"Not available"' not in cost_page
     assert "set_plan_navigation_state" in source
     assert "st.rerun()" in source
+
+
+def _app_helper(name: str):
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    namespace = {"pd": pd}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "app.py", "exec"), namespace)
+    return namespace[name]
+
+
+def test_phase29_prediction_validator_requires_schema_and_real_values():
+    has_real_predictions = _app_helper("_has_real_phase29_predictions")
+
+    assert has_real_predictions(pd.DataFrame()) is False
+    assert has_real_predictions(pd.DataFrame({"Asset": ["Gold"]})) is False
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Gold"], "PredictedPrice": [None], "PredictedMovePct": [None],
+    })) is False
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Gold"], "PredictedPrice": ["4114.5446"], "PredictedMovePct": [None],
+    })) is True
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Silver"], "PredictedPrice": [None], "PredictedMovePct": ["2.7847"],
+    })) is True
+
+
+def test_phase29_snapshot_reads_are_centralized_and_rerun_once_after_success():
+    source = (ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert "def _get_phase29_snapshot()" in source
+    assert source.count('_load_phase29_table("phase29_all_asset_prediction_snapshot.csv")') == 1
+    assert source.count("_get_phase29_snapshot()") >= 6
+    success_block = source.split(
+        'run_status.update(label="Final research snapshot ready", state="complete", expanded=False)', 1
+    )[1].split("except Exception as exc:", 1)[0]
+    assert "st.session_state.phase29_snapshot_ready = True" in success_block
+    assert "st.rerun()" in success_block
+
+
+def test_internal_phase29_labels_are_formatted_for_display_only():
+    assert _display_label("ExpectedDelay") == "Recent data delay"
+    assert _display_label("MissingEstimate") == "Estimate unavailable"
+    assert _display_label("Not Enough Evidence") == "Insufficient evidence"
+    assert _display_label("High Risk") == "High Risk"
 
 
 def test_phase29b_outputs_and_user_facing_source_avoid_forbidden_phrases():
