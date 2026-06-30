@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 import pandas as pd
@@ -30,6 +31,7 @@ EDGE_EVIDENCE_COLUMNS = [
     "MaxDrawdownPct",
     "WalkForwardReturnPct",
     "TradeCount",
+    "ValidationMetricSource",
     "EvidenceSummary",
     "MainRisk",
     "RequiredBeforeAction",
@@ -47,14 +49,60 @@ ALIASES = {
         "ActiveMinusPassiveNetPct", "ActiveMinusPassivePct", "ExcessReturnPct",
     ),
     "CostDragPct": ("CostDragPct",),
-    "WinRatePct": ("WinRatePct", "WinRate", "HitRatePct"),
-    "Sharpe": ("Sharpe", "SharpeRatio"),
-    "MaxDrawdownPct": ("MaxDrawdownPct", "MaxDrawdown"),
-    "WalkForwardReturnPct": ("WalkForwardReturnPct", "TotalReturnPct", "StrategyReturnPct"),
-    "TradeCount": ("TradeCount", "Trades", "NumTrades"),
+}
+
+VALIDATION_ALIASES = {
+    "Sharpe": ("Sharpe", "SharpeRatio", "SharpeProxy", "SharpeLike"),
+    "MaxDrawdownPct": (
+        "MaxDrawdownPct", "MaxDrawdown", "ProxyMaxDrawdownPct", "ModelDrawdownPct",
+    ),
+    "WinRatePct": (
+        "WinRatePct", "WinRate", "HitRatePct", "HitRate", "ForwardWinRate_%", "WinRate_%",
+    ),
+    "WalkForwardReturnPct": (
+        "WalkForwardReturnPct", "TotalReturnPct", "StrategyReturnPct", "ModelStrategyReturnPct",
+    ),
+    "TradeCount": ("TradeCount", "Trades", "NumTrades", "MaturedTrades", "RawTradeCount"),
 }
 
 VALIDATION_FIELDS = ("WinRatePct", "Sharpe", "MaxDrawdownPct", "WalkForwardReturnPct")
+VALIDATION_HYDRATION_FIELDS = tuple(VALIDATION_ALIASES)
+
+EDGE_METRIC_SOURCE_PATHS = {
+    "phase16_asset_horizon_benchmark": (
+        "phase16_strategy_benchmark_arena/asset_horizon_benchmark_table.csv"
+    ),
+    "phase16_strategy_leaderboard": (
+        "phase16_strategy_benchmark_arena/strategy_leaderboard_table.csv"
+    ),
+    "phase17_historical_replay_performance": (
+        "phase17_historical_model_replay/historical_replay_performance.csv"
+    ),
+    "phase17_replay_asset_horizon_matrix": (
+        "phase17_historical_model_replay/replay_asset_horizon_matrix.csv"
+    ),
+    "phase20_true_ml_performance": (
+        "phase20_true_historical_ml_replay/phase20_true_ml_performance.csv"
+    ),
+    "phase22_asset_horizon_model_scorecard": (
+        "phase22_prediction_edge_improvement/phase22_asset_horizon_model_scorecard.csv"
+    ),
+    "phase22_model_leaderboard": (
+        "phase22_prediction_edge_improvement/phase22_model_leaderboard.csv"
+    ),
+}
+
+VALIDATION_METRIC_COLUMNS = [
+    "Asset",
+    "Horizon",
+    "Source",
+    "Sharpe",
+    "MaxDrawdownPct",
+    "WinRatePct",
+    "WalkForwardReturnPct",
+    "TradeCount",
+    "ValidationMetricSource",
+]
 
 
 def _frame(value: Any) -> pd.DataFrame:
@@ -87,6 +135,63 @@ def _normalize(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
 
+def load_latest_edge_metric_sources(
+    root: Path = Path("artifacts/latest"),
+) -> dict[str, pd.DataFrame]:
+    """Load optional saved validation tables without making page rendering fragile."""
+    base = Path(root)
+    sources: dict[str, pd.DataFrame] = {}
+    for source, relative_path in EDGE_METRIC_SOURCE_PATHS.items():
+        path = base / relative_path
+        try:
+            sources[source] = pd.read_csv(path) if path.is_file() else pd.DataFrame()
+        except Exception:
+            sources[source] = pd.DataFrame()
+    return sources
+
+
+def _column_value(frame: pd.DataFrame, aliases: Sequence[str]) -> pd.Series:
+    for alias in aliases:
+        if alias in frame.columns:
+            return frame[alias]
+    return pd.Series(pd.NA, index=frame.index, dtype="object")
+
+
+def build_validation_metric_table(
+    metric_sources: Mapping[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Normalize real saved validation metrics while preserving missing values."""
+    normalized: list[pd.DataFrame] = []
+    for source, raw_frame in metric_sources.items():
+        frame = _frame(raw_frame)
+        if frame.empty or "Asset" not in frame.columns:
+            continue
+
+        rows = pd.DataFrame(index=frame.index)
+        rows["Asset"] = frame["Asset"].astype("string")
+        rows["Horizon"] = pd.to_numeric(
+            _column_value(frame, ("Horizon", "BestHorizon")), errors="coerce"
+        )
+        rows["Source"] = str(source)
+        for field, aliases in VALIDATION_ALIASES.items():
+            rows[field] = pd.to_numeric(_column_value(frame, aliases), errors="coerce")
+        rows["ValidationMetricSource"] = str(source)
+        rows = rows.loc[rows["Asset"].notna() & rows["Asset"].str.strip().ne("")]
+        normalized.append(rows[VALIDATION_METRIC_COLUMNS])
+
+    if not normalized:
+        return pd.DataFrame(columns=VALIDATION_METRIC_COLUMNS)
+    return pd.concat(normalized, ignore_index=True)[VALIDATION_METRIC_COLUMNS]
+
+
+def format_edge_metric(value: Any, suffix: str = "", precision: int = 2) -> str:
+    """Format one evidence metric without turning unavailable evidence into zero."""
+    numeric = _number(value)
+    if numeric is None:
+        return "Evidence unavailable"
+    return f"{numeric:.{int(precision)}f}{suffix}"
+
+
 def _asset_order(frames: Iterable[pd.DataFrame]) -> list[str]:
     assets: list[str] = []
     for frame in frames:
@@ -116,6 +221,51 @@ def _best_row(frame: pd.DataFrame, asset: str, horizon: Optional[int]) -> dict[s
         rows.get("OpportunityScore", pd.Series(index=rows.index, dtype=float)), errors="coerce"
     ).fillna(-1.0)
     return rows.loc[scores.sort_values(ascending=False).index[0]].to_dict()
+
+
+def _validation_source_rank(source: Any) -> int:
+    normalized = _normalize(source)
+    for rank, phase in enumerate(("phase20", "phase22", "phase17", "phase16")):
+        if normalized.startswith(phase):
+            return rank
+    return 99
+
+
+def _best_validation_row(
+    validation_metrics: pd.DataFrame,
+    asset: str,
+    horizon: Optional[int],
+) -> dict[str, Any]:
+    if validation_metrics.empty or "Asset" not in validation_metrics.columns:
+        return {}
+    rows = validation_metrics.loc[
+        validation_metrics["Asset"].astype(str).eq(asset)
+    ].copy()
+    if rows.empty:
+        return {}
+
+    if horizon is not None and "Horizon" in rows.columns:
+        horizons = pd.to_numeric(rows["Horizon"], errors="coerce")
+        exact = rows.loc[horizons.eq(int(horizon))]
+        if not exact.empty:
+            rows = exact
+
+    available_fields = [field for field in VALIDATION_HYDRATION_FIELDS if field in rows.columns]
+    rows["_metric_count"] = rows[available_fields].notna().sum(axis=1)
+    rows["_trade_count"] = pd.to_numeric(
+        rows.get("TradeCount", pd.Series(index=rows.index, dtype=float)), errors="coerce"
+    ).fillna(-1.0)
+    source_values = rows.get(
+        "ValidationMetricSource",
+        rows.get("Source", pd.Series("", index=rows.index)),
+    )
+    rows["_source_rank"] = source_values.map(_validation_source_rank)
+    best = rows.sort_values(
+        ["_metric_count", "_trade_count", "_source_rank"],
+        ascending=[False, False, True],
+        kind="stable",
+    ).iloc[0]
+    return best.drop(labels=["_metric_count", "_trade_count", "_source_rank"]).to_dict()
 
 
 def _first_value(rows: Sequence[Mapping[str, Any]], aliases: Sequence[str]) -> Any:
@@ -260,13 +410,15 @@ def build_edge_evidence_table(
     prediction_snapshot: pd.DataFrame | None = None,
     cost_plans: pd.DataFrame | None = None,
     research_snapshot: pd.DataFrame | None = None,
+    validation_metrics: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build one evidence-of-edge row per saved asset without inventing missing metrics."""
     watch = _frame(watchlist)
     predictions = _frame(prediction_snapshot)
     costs = _frame(cost_plans)
     research = _frame(research_snapshot)
-    assets = _asset_order((watch, predictions, costs, research))
+    validation = _frame(validation_metrics)
+    assets = _asset_order((watch, predictions, costs, research, validation))
     if not assets:
         return pd.DataFrame(columns=EDGE_EVIDENCE_COLUMNS)
 
@@ -279,6 +431,9 @@ def build_edge_evidence_table(
             horizon = _number(prediction_row.get("BestHorizon", prediction_row.get("Horizon")))
         cost_row = _best_row(costs, asset, int(horizon) if horizon is not None else None)
         research_row = _best_row(research, asset, int(horizon) if horizon is not None else None)
+        validation_row = _best_validation_row(
+            validation, asset, int(horizon) if horizon is not None else None
+        )
         rows = (cost_row, prediction_row, watch_row, research_row)
 
         category = str(_first_value((watch_row, prediction_row), ("Category",)) or "Insufficient Evidence")
@@ -300,6 +455,12 @@ def build_edge_evidence_table(
             for field in ALIASES
             if field != "BenchmarkName"
         }
+        validation_evidence = {
+            field: _number(validation_row.get(field)) for field in VALIDATION_HYDRATION_FIELDS
+        }
+        validation_source = validation_row.get(
+            "ValidationMetricSource", validation_row.get("Source")
+        )
         if evidence["ActiveMinusPassivePct"] is None:
             active = evidence["ActiveEstimatePct"]
             passive = evidence["PassiveEstimatePct"]
@@ -313,8 +474,20 @@ def build_edge_evidence_table(
             "PredictedMovePct": predicted_move,
             "PredictedPrice": predicted_price,
             **evidence,
+            **validation_evidence,
         }
         edge_status, evidence_grade, evidence_summary = classify_edge_status(classification_row)
+        if _present(validation_source) and any(
+            value is not None for value in validation_evidence.values()
+        ):
+            evidence_summary = (
+                f"{evidence_summary} Validation metrics are loaded from {validation_source}."
+            )
+        else:
+            evidence_summary = (
+                f"{evidence_summary} Validation metrics such as Sharpe, drawdown, or win rate "
+                "are not available in the saved evidence yet."
+            )
         output.append({
             "Asset": asset,
             "Category": category,
@@ -327,6 +500,10 @@ def build_edge_evidence_table(
             "Status": format_watchlist_label(raw_status),
             "BenchmarkName": str(benchmark_name) if _present(benchmark_name) else "Evidence unavailable",
             **evidence,
+            **validation_evidence,
+            "ValidationMetricSource": (
+                str(validation_source) if _present(validation_source) else pd.NA
+            ),
             "EvidenceSummary": evidence_summary,
             "MainRisk": main_risk,
             "RequiredBeforeAction": _required_before_action(edge_status, saved_requirement),
@@ -377,7 +554,13 @@ def summarize_edge_evidence(edge_table: pd.DataFrame) -> dict[str, Any]:
 
 __all__ = [
     "EDGE_EVIDENCE_COLUMNS",
+    "EDGE_METRIC_SOURCE_PATHS",
+    "VALIDATION_METRIC_COLUMNS",
     "ALIASES",
+    "VALIDATION_ALIASES",
+    "load_latest_edge_metric_sources",
+    "build_validation_metric_table",
+    "format_edge_metric",
     "classify_edge_status",
     "build_edge_evidence_table",
     "summarize_edge_evidence",

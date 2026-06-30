@@ -14,7 +14,10 @@ sys.path.insert(0, str(ROOT))
 from src.evidence_of_edge import (
     EDGE_EVIDENCE_COLUMNS,
     build_edge_evidence_table,
+    build_validation_metric_table,
     classify_edge_status,
+    format_edge_metric,
+    load_latest_edge_metric_sources,
     summarize_edge_evidence,
 )
 
@@ -75,7 +78,7 @@ def test_positive_gap_manageable_cost_and_validation_support_edge():
     costs = pd.DataFrame([_cost_row()])
     validation = pd.DataFrame([{"Asset": "Gold", "Horizon": 5, "Sharpe": 1.1}])
 
-    result = build_edge_evidence_table(watchlist, cost_plans=costs, research_snapshot=validation)
+    result = build_edge_evidence_table(watchlist, cost_plans=costs, validation_metrics=validation)
     row = result.iloc[0]
 
     assert row["EdgeStatus"] == "Edge Supported"
@@ -87,7 +90,7 @@ def test_negative_active_minus_passive_is_benchmark_weak():
     result = build_edge_evidence_table(
         pd.DataFrame([_watch_row()]),
         cost_plans=pd.DataFrame([_cost_row(active=0.5, passive=1.2, gap=-0.7)]),
-        research_snapshot=pd.DataFrame([{"Asset": "Gold", "Horizon": 5, "Sharpe": 1.0}]),
+        validation_metrics=pd.DataFrame([{"Asset": "Gold", "Horizon": 5, "Sharpe": 1.0}]),
     )
 
     assert result.iloc[0]["EdgeStatus"] == "Benchmark Weak"
@@ -108,7 +111,7 @@ def test_candidate_with_missing_validation_is_watch_only():
     result = build_edge_evidence_table(
         pd.DataFrame([_watch_row()]),
         cost_plans=pd.DataFrame([_cost_row()]),
-        research_snapshot=pd.DataFrame(),
+        validation_metrics=pd.DataFrame(),
     )
 
     assert result.iloc[0]["EdgeStatus"] == "Watch Only"
@@ -168,17 +171,19 @@ def test_column_aliases_are_resolved_without_metric_invention():
         "CostDragPct": 0.25,
         "CostVerdict": "CostsLow",
     }])
-    research = pd.DataFrame([{
-        "Asset": "Gold",
-        "Horizon": 5,
-        "HitRatePct": 58.0,
-        "SharpeRatio": 1.3,
-        "MaxDrawdown": -8.0,
-        "StrategyReturnPct": 4.5,
-        "Trades": 18,
-    }])
+    research = build_validation_metric_table({
+        "phase20_true_ml_performance": pd.DataFrame([{
+            "Asset": "Gold",
+            "Horizon": 5,
+            "HitRatePct": 58.0,
+            "SharpeRatio": 1.3,
+            "MaxDrawdown": -8.0,
+            "StrategyReturnPct": 4.5,
+            "Trades": 18,
+        }])
+    })
 
-    row = build_edge_evidence_table(watchlist, cost_plans=costs, research_snapshot=research).iloc[0]
+    row = build_edge_evidence_table(watchlist, cost_plans=costs, validation_metrics=research).iloc[0]
     assert row["BenchmarkName"] == "Gold benchmark"
     assert row["ActiveEstimatePct"] == 2.2
     assert row["PassiveEstimatePct"] == 1.0
@@ -190,6 +195,89 @@ def test_column_aliases_are_resolved_without_metric_invention():
     assert row["TradeCount"] == 18.0
     assert row["EdgeStatus"] == "Edge Supported"
     assert row["EvidenceGrade"] == "A"
+
+
+def test_validation_table_maps_sharpe_proxy():
+    table = build_validation_metric_table({
+        "phase16_asset_horizon_benchmark": pd.DataFrame([{
+            "Asset": "Gold", "Horizon": 5, "SharpeProxy": 0.72,
+        }])
+    })
+
+    assert table.iloc[0]["Sharpe"] == 0.72
+
+
+def test_validation_table_maps_hit_rate_to_win_rate():
+    table = build_validation_metric_table({
+        "phase20_true_ml_performance": pd.DataFrame([{
+            "Asset": "Silver", "Horizon": 10, "HitRatePct": 57.5,
+        }])
+    })
+
+    assert table.iloc[0]["WinRatePct"] == 57.5
+
+
+def test_validation_table_maps_saved_return_aliases():
+    table = build_validation_metric_table({
+        "phase16_asset_horizon_benchmark": pd.DataFrame([{
+            "Asset": "Gold", "Horizon": 5, "ModelStrategyReturnPct": 4.2,
+        }]),
+        "phase17_historical_replay_performance": pd.DataFrame([{
+            "Asset": "Bitcoin", "Horizon": 1, "TotalReturnPct": 3.1,
+        }]),
+    })
+
+    returns = table.set_index("Asset")["WalkForwardReturnPct"].to_dict()
+    assert returns == {"Gold": 4.2, "Bitcoin": 3.1}
+
+
+def test_edge_table_hydrates_validation_by_asset_and_horizon():
+    metrics = build_validation_metric_table({
+        "phase20_true_ml_performance": pd.DataFrame([
+            {"Asset": "Gold", "Horizon": 1, "SharpeLike": 0.4, "MaturedTrades": 20},
+            {"Asset": "Gold", "Horizon": 5, "SharpeLike": 1.4, "MaturedTrades": 8},
+        ])
+    })
+
+    row = build_edge_evidence_table(
+        pd.DataFrame([_watch_row()]),
+        cost_plans=pd.DataFrame([_cost_row()]),
+        validation_metrics=metrics,
+    ).iloc[0]
+
+    assert row["Sharpe"] == 1.4
+    assert row["TradeCount"] == 8.0
+    assert row["ValidationMetricSource"] == "phase20_true_ml_performance"
+    assert "Validation metrics are loaded from phase20_true_ml_performance." in row["EvidenceSummary"]
+
+
+def test_edge_table_falls_back_to_same_asset_when_horizon_is_unavailable():
+    metrics = build_validation_metric_table({
+        "phase17_historical_replay_performance": pd.DataFrame([{
+            "Asset": "Gold", "Horizon": 20, "SharpeProxy": 0.9, "TradeCount": 31,
+        }])
+    })
+
+    row = build_edge_evidence_table(
+        pd.DataFrame([_watch_row()]), validation_metrics=metrics
+    ).iloc[0]
+
+    assert row["Sharpe"] == 0.9
+    assert row["TradeCount"] == 31.0
+
+
+def test_missing_metric_source_files_are_safe(tmp_path):
+    sources = load_latest_edge_metric_sources(tmp_path / "does-not-exist")
+
+    assert sources
+    assert all(isinstance(frame, pd.DataFrame) and frame.empty for frame in sources.values())
+    assert build_validation_metric_table(sources).empty
+
+
+def test_format_edge_metric_preserves_missing_evidence_label():
+    assert format_edge_metric(None) == "Evidence unavailable"
+    assert format_edge_metric(float("nan"), "%") == "Evidence unavailable"
+    assert format_edge_metric(2.345, "%", 2) == "2.35%"
 
 
 def test_evidence_page_is_after_candidate_watchlist_and_language_is_restrained():
@@ -210,8 +298,8 @@ def test_evidence_page_is_after_candidate_watchlist_and_language_is_restrained()
         "Asset", "Category", "Direction", "EdgeStatus", "EvidenceGrade", "OpportunityScore",
         "PredictedMovePct", "CostVerdict", "Status", "BenchmarkName", "ActiveEstimatePct",
         "PassiveEstimatePct", "ActiveMinusPassivePct", "CostDragPct", "WinRatePct", "Sharpe",
-        "MaxDrawdownPct", "WalkForwardReturnPct", "TradeCount", "EvidenceSummary", "MainRisk",
-        "RequiredBeforeAction",
+        "MaxDrawdownPct", "WalkForwardReturnPct", "TradeCount", "ValidationMetricSource",
+        "EvidenceSummary", "MainRisk", "RequiredBeforeAction",
     ]
 
 
@@ -227,4 +315,3 @@ def test_classify_edge_status_returns_three_readable_fields():
     assert result[0] == "Edge Supported"
     assert result[1] in {"A", "B"}
     assert result[2]
-

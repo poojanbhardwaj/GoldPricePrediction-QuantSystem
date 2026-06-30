@@ -76,7 +76,13 @@ from src.final_user_dashboard import (
     set_plan_navigation_state,
 )
 from src.candidate_watchlist import build_candidate_watchlist, summarize_watchlist
-from src.evidence_of_edge import build_edge_evidence_table, summarize_edge_evidence
+from src.evidence_of_edge import (
+    build_edge_evidence_table,
+    build_validation_metric_table,
+    format_edge_metric,
+    load_latest_edge_metric_sources,
+    summarize_edge_evidence,
+)
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
     train_directional_models,
@@ -677,6 +683,9 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
     if not isinstance(research_snapshot, pd.DataFrame) or research_snapshot.empty:
         research_snapshot = _load_phase26_table("phase26_research_snapshot")
 
+    metric_sources = load_latest_edge_metric_sources()
+    validation_metrics = build_validation_metric_table(metric_sources)
+
     watchlist = build_candidate_watchlist(
         prediction_snapshot,
         cost_plans=cost_plans,
@@ -687,6 +696,7 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
         prediction_snapshot=prediction_snapshot,
         cost_plans=cost_plans,
         research_snapshot=research_snapshot,
+        validation_metrics=validation_metrics,
     )
     if edge_table.empty:
         render_empty_state(
@@ -707,10 +717,47 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
     table_columns = [
         "Asset", "Category", "Direction", "EdgeStatus", "EvidenceGrade", "OpportunityScore",
         "PredictedMovePct", "ActiveMinusPassivePct", "CostDragPct", "CostVerdict", "Sharpe",
-        "MaxDrawdownPct", "WinRatePct", "WalkForwardReturnPct", "EvidenceSummary",
-        "RequiredBeforeAction",
+        "MaxDrawdownPct", "WinRatePct", "WalkForwardReturnPct", "TradeCount",
+        "ValidationMetricSource", "EvidenceSummary", "RequiredBeforeAction",
     ]
-    st.dataframe(edge_table[table_columns], width="stretch", hide_index=True)
+    display_table = edge_table[table_columns].copy()
+    display_formats = {
+        "OpportunityScore": ("", 1),
+        "PredictedMovePct": ("%", 2),
+        "ActiveMinusPassivePct": ("%", 2),
+        "CostDragPct": ("%", 2),
+        "Sharpe": ("", 2),
+        "MaxDrawdownPct": ("%", 2),
+        "WinRatePct": ("%", 2),
+        "WalkForwardReturnPct": ("%", 2),
+        "TradeCount": ("", 0),
+    }
+    for column, (suffix, precision) in display_formats.items():
+        display_table[column] = display_table[column].map(
+            lambda value, s=suffix, p=precision: format_edge_metric(value, s, p)
+        )
+    display_table["ValidationMetricSource"] = display_table["ValidationMetricSource"].map(
+        lambda value: str(value) if pd.notna(value) and str(value).strip() else "Evidence unavailable"
+    )
+    st.dataframe(display_table, width="stretch", hide_index=True)
+
+    with st.expander("Validation metric sources", expanded=False):
+        source_rows = pd.DataFrame([
+            {
+                "Source": source,
+                "Rows": int(len(frame)) if isinstance(frame, pd.DataFrame) else 0,
+                "Status": (
+                    "Loaded"
+                    if isinstance(frame, pd.DataFrame) and not frame.empty
+                    else "Evidence unavailable"
+                ),
+            }
+            for source, frame in metric_sources.items()
+        ])
+        st.caption(
+            f"{len(validation_metrics):,} normalized validation rows are available for matching."
+        )
+        st.dataframe(source_rows, width="stretch", hide_index=True)
 
     visible = edge_table.loc[edge_table["EdgeStatus"].ne("Insufficient Evidence")].copy()
     if not visible.empty:
