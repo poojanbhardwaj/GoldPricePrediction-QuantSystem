@@ -506,18 +506,13 @@ def render_simple_plan_card(row: Mapping[str, Any]) -> None:
 
 
 def render_research_launch_panel(snapshot_source: str = "missing") -> None:
-    if snapshot_source == "session":
-        message = "Showing research results generated in this session. Run Full Research again only when you want to refresh them."
-    elif snapshot_source == "saved":
+    if snapshot_source == "saved":
         message = (
             "Showing saved research snapshot from the latest checked-in demo run. "
             "Click Run Full Research to refresh it in this session."
         )
     else:
-        message = (
-            "No saved research snapshot is available. Click Run Full Research to combine prices, forecasts, "
-            "risk, passive comparisons, costs, scores, and simple plans."
-        )
+        message = "Prices, forecasts, risk, benchmarks, costs, scores, and simple plans are combined after you start the run."
     st.markdown(
         '<div class="run-research-panel"><div><h3>Build the complete user snapshot</h3>'
         f'<p>{_safe(message)}</p></div>'
