@@ -86,14 +86,18 @@ from src.evidence_of_edge import (
 )
 from src.user_platform import (
     apply_profile_defaults,
-    get_or_create_demo_user,
-    init_user_platform_db,
     list_user_plan_runs,
     load_latest_user_plan,
     load_user_profile,
     personalize_asset_plans,
     save_user_plan_run,
     save_user_profile,
+)
+from src.auth_manager import (
+    get_current_auth_user,
+    is_user_unlocked,
+    logout_current_user,
+    unlock_demo_user,
 )
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
@@ -195,6 +199,7 @@ from src.ui_components import (
     render_prediction_snapshot_card,
     render_premium_header,
     render_professional_hero,
+    render_product_topbar,
     render_research_disclaimer,
     render_risk_explanation_card,
     render_run_research_panel,
@@ -606,22 +611,16 @@ def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = Non
 
 
 def _is_user_unlocked() -> bool:
-    return bool(st.session_state.get("user_unlocked", False))
+    return is_user_unlocked()
 
 
 def _unlock_demo_user() -> None:
-    init_user_platform_db()
-    user = get_or_create_demo_user()
-    st.session_state.user_unlocked = True
-    st.session_state.demo_user_id = user["id"]
-    st.session_state.primary_product_navigation = "User Goals & Saved Plans"
+    unlock_demo_user()
     st.rerun()
 
 
 def _logout_demo_user() -> None:
-    st.session_state.user_unlocked = False
-    st.session_state.demo_user_id = None
-    st.session_state.primary_product_navigation = "Market Research Assistant"
+    logout_current_user()
     st.rerun()
 
 
@@ -757,20 +756,32 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
 
 def _render_unlock_prompt() -> None:
     render_professional_hero(
-        "Unlock personalized research plans",
-        "Use demo mode to save goals, generate personalized paper-research plans, and review candidate/evidence history.",
+        "Access your research workspace",
+        "Unlock personalized research plans in demo mode now. Real account login can be connected later without changing the research workflow.",
         badges=("Demo user", "Research-only", "Paper-tracking"),
     )
     st.warning(
         "Do not enter broker, bank, trading-account credentials, or API secrets. This app is research-only."
     )
-    st.button(
-        "Continue as Demo User",
-        type="primary",
-        key="gated_page_unlock",
-        on_click=_unlock_demo_user,
-    )
-
+    demo_col, future_col = st.columns(2)
+    with demo_col:
+        with st.container(border=True):
+            st.markdown("### Demo access")
+            st.write(
+                "Explore saved plans, evidence checks, candidate watchlists, and paper-research workflows."
+            )
+            st.button(
+                "Continue as Demo User",
+                type="primary",
+                key="gated_page_unlock",
+                on_click=_unlock_demo_user,
+                width="stretch",
+            )
+    with future_col:
+        with st.container(border=True):
+            st.markdown("### Coming later")
+            st.write("Email login, persistent cloud profile, user-specific research history, and secure account settings.")
+            st.caption("Credential entry is not active in this phase.")
 
 def _status_card_style(status: str) -> str:
     return {
@@ -1106,18 +1117,17 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
 
 
 def _render_user_goals_saved_plans() -> None:
-    try:
-        init_user_platform_db()
-        user = get_or_create_demo_user()
-    except Exception as exc:
-        render_empty_state(
-            "Local plan storage is unavailable",
-            f"The demo-user database could not be opened: {exc}",
-        )
+    current_user = get_current_auth_user()
+    if not current_user.is_authenticated or current_user.app_user_id is None:
+        st.info("Unlock demo mode to save a user-owned profile or personalized plan.")
+        _render_unlock_prompt()
         return
+    user_id = int(current_user.app_user_id)
 
-    saved_profile = load_user_profile(int(user["id"]))
-    profile = apply_profile_defaults(saved_profile or {"name": user.get("name", "Demo User")})
+    saved_profile = load_user_profile(user_id)
+    profile = apply_profile_defaults(
+        saved_profile or {"name": current_user.display_name}
+    )
     supported_assets = get_supported_assets()
 
     experience_options = ["Beginner", "Intermediate", "Advanced", "I don't know"]
@@ -1223,8 +1233,8 @@ def _render_user_goals_saved_plans() -> None:
     })
 
     if save_clicked or generate_clicked:
-        save_user_profile(int(user["id"]), profile_input)
-        st.success("Demo profile saved locally.")
+        save_user_profile(user_id, profile_input)
+        st.success("Research profile saved for the current user.")
 
     generated_plans = pd.DataFrame()
     if generate_clicked:
@@ -1262,7 +1272,7 @@ def _render_user_goals_saved_plans() -> None:
             validation_metrics=validation_metrics,
         )
         generated_plans = personalize_asset_plans(profile_input, watchlist, edge_table)
-        save_user_plan_run(int(user["id"]), profile_input, generated_plans)
+        save_user_plan_run(user_id, profile_input, generated_plans)
         st.session_state.phase32a_personalized_plans = generated_plans
         st.success("Personalized paper-research plan saved.")
 
@@ -1271,7 +1281,7 @@ def _render_user_goals_saved_plans() -> None:
         session_plans = st.session_state.get("phase32a_personalized_plans")
         active_plans = session_plans if isinstance(session_plans, pd.DataFrame) else pd.DataFrame()
     if active_plans.empty:
-        active_plans = load_latest_user_plan(int(user["id"]))
+        active_plans = load_latest_user_plan(user_id)
 
     render_section_header(
         "Latest saved plan",
@@ -1323,8 +1333,8 @@ def _render_user_goals_saved_plans() -> None:
             "Personalized research plan": (active_plans, "personalized_research_plan.csv"),
         })
 
-    plan_runs = list_user_plan_runs(int(user["id"]))
-    render_section_header("Previous plan runs", "Saved locally for the demo user so research can be reviewed over time.")
+    plan_runs = list_user_plan_runs(user_id)
+    render_section_header("Previous plan runs", "Saved locally for the current user so research can be reviewed over time.")
     if plan_runs.empty:
         st.info("No previous plan runs are saved yet.")
     else:
@@ -1773,6 +1783,18 @@ if _is_user_unlocked() and _asset_mismatch(selected_asset):
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Research assistant | Real-money decisions disabled")
+
+
+current_auth_user = get_current_auth_user()
+render_product_topbar(
+    app_name="Quant Research Lab",
+    mode_label="Demo user active" if current_auth_user.is_authenticated else "Public preview",
+    user_label=current_auth_user.display_name if current_auth_user.is_authenticated else "Public preview",
+    is_unlocked=current_auth_user.is_authenticated,
+    on_unlock=_unlock_demo_user,
+    on_logout=_logout_demo_user,
+)
+
 
 if is_advanced_diagnostic:
     st.info("Advanced diagnostic page. Normal users should use Market Research Assistant or Asset Plans first.")

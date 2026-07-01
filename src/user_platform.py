@@ -31,6 +31,9 @@ PERSONALIZED_PLAN_COLUMNS = [
     "RiskFit",
     "EvidenceGrade",
     "EdgeStatus",
+    "CandidateCategory",
+    "RiskLabel",
+    "CostVerdict",
     "PersonalizedPlan",
     "WhatToMonitor",
     "RequiredBeforeAction",
@@ -57,6 +60,19 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {
+        str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
@@ -131,25 +147,117 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
             );
             """
         )
+        for column, definition in (
+            ("auth_provider", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("auth_user_id", "TEXT"),
+            ("display_name", "TEXT"),
+            ("is_demo", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_active_at", "TEXT"),
+        ):
+            _ensure_column(connection, "users", column, definition)
+        for column in ("candidate_category", "risk_label", "cost_verdict"):
+            _ensure_column(connection, "user_asset_plans", column, "TEXT")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity
+            ON users(auth_provider, auth_user_id)
+            """
+        )
+        timestamp = _now()
+        connection.execute(
+            """
+            UPDATE users
+            SET auth_provider = 'demo', auth_user_id = 'demo-user',
+                display_name = COALESCE(display_name, name), is_demo = 1,
+                last_active_at = COALESCE(last_active_at, updated_at, ?)
+            WHERE email = 'demo@local.app'
+            """,
+            (timestamp,),
+        )
+
+
+def get_or_create_user_for_auth(
+    auth_provider: str,
+    auth_user_id: str,
+    display_name: str,
+    email: str | None = None,
+    is_demo: bool = False,
+    db_path: str | Path = "data/app.db",
+) -> dict[str, Any]:
+    """Resolve an application user for a future external auth identity."""
+    provider = str(auth_provider or "").strip()
+    provider_user_id = str(auth_user_id or "").strip()
+    if not provider or not provider_user_id:
+        raise ValueError("auth_provider and auth_user_id are required")
+    init_user_platform_db(db_path)
+    timestamp = _now()
+    fallback_email = f"{provider}.{provider_user_id}@local.invalid"
+    stored_email = str(email).strip() if email else fallback_email
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT id FROM users WHERE auth_provider = ? AND auth_user_id = ?",
+            (provider, provider_user_id),
+        ).fetchone()
+        if row is None and email:
+            row = connection.execute(
+                "SELECT id FROM users WHERE email = ?", (stored_email,)
+            ).fetchone()
+        if row is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO users (
+                    email, name, created_at, updated_at, auth_provider, auth_user_id,
+                    display_name, is_demo, last_active_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stored_email, str(display_name or "Research User"), timestamp, timestamp,
+                    provider, provider_user_id, str(display_name or "Research User"),
+                    int(bool(is_demo)), timestamp,
+                ),
+            )
+            user_id = int(cursor.lastrowid)
+        else:
+            user_id = int(row["id"])
+            connection.execute(
+                """
+                UPDATE users
+                SET name = ?, display_name = ?, auth_provider = ?, auth_user_id = ?,
+                    is_demo = ?, last_active_at = ?, updated_at = ?,
+                    email = CASE WHEN ? IS NOT NULL THEN ? ELSE email END
+                WHERE id = ?
+                """,
+                (
+                    str(display_name or "Research User"), str(display_name or "Research User"),
+                    provider, provider_user_id, int(bool(is_demo)), timestamp, timestamp,
+                    email, stored_email, user_id,
+                ),
+            )
+        result = connection.execute(
+            """
+            SELECT id, email, name, auth_provider, auth_user_id, display_name,
+                   is_demo, created_at, last_active_at
+            FROM users WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    user = dict(result) if result is not None else {}
+    if user.get("email") == fallback_email and email is None:
+        user["email"] = None
+    user["is_demo"] = bool(user.get("is_demo", False))
+    return user
 
 
 def get_or_create_demo_user(db_path: str | Path = "data/app.db") -> dict[str, Any]:
-    """Return the single local demo identity without collecting credentials."""
-    init_user_platform_db(db_path)
-    timestamp = _now()
-    with _connect(db_path) as connection:
-        connection.execute(
-            """
-            INSERT INTO users (email, name, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(email) DO UPDATE SET updated_at = excluded.updated_at
-            """,
-            ("demo@local.app", "Demo User", timestamp, timestamp),
-        )
-        row = connection.execute(
-            "SELECT id, email, name FROM users WHERE email = ?", ("demo@local.app",)
-        ).fetchone()
-    return dict(row) if row is not None else {}
+    """Return the backward-compatible local demo identity."""
+    return get_or_create_user_for_auth(
+        auth_provider="demo",
+        auth_user_id="demo-user",
+        display_name="Demo User",
+        email="demo@local.app",
+        is_demo=True,
+        db_path=db_path,
+    )
 
 
 def _is_unsure(value: Any) -> bool:
@@ -245,11 +353,13 @@ def _json_safe(value: Any) -> Any:
 
 
 def save_user_profile(
-    user_id: int,
+    user_id: int | None,
     profile: Mapping[str, Any],
     db_path: str | Path = "data/app.db",
 ) -> int:
     """Insert or update one demo-user profile and return its row id."""
+    if user_id is None:
+        raise ValueError("An unlocked application user is required to save a profile")
     init_user_platform_db(db_path)
     normalized = apply_profile_defaults(profile)
     timestamp = _now()
@@ -302,9 +412,11 @@ def save_user_profile(
 
 
 def load_user_profile(
-    user_id: int, db_path: str | Path = "data/app.db"
+    user_id: int | None, db_path: str | Path = "data/app.db"
 ) -> dict[str, Any] | None:
     """Load one saved profile, returning None before the first save."""
+    if user_id is None:
+        return None
     init_user_platform_db(db_path)
     with _connect(db_path) as connection:
         row = connection.execute(
@@ -522,6 +634,13 @@ def personalize_asset_plans(
             "RiskFit": _risk_fit(profile, plan_type, candidate.get("Status", edge.get("Status"))),
             "EvidenceGrade": grade,
             "EdgeStatus": edge_status,
+            "CandidateCategory": str(candidate.get("Category") or "Evidence unavailable"),
+            "RiskLabel": str(
+                candidate.get("RiskLabel") or candidate.get("Status") or "Evidence unavailable"
+            ),
+            "CostVerdict": str(
+                edge.get("CostVerdict") or candidate.get("CostVerdict") or "Evidence unavailable"
+            ),
             "PersonalizedPlan": f"{action_language} {reason}",
             "WhatToMonitor": str(
                 edge.get("MainRisk")
@@ -539,13 +658,15 @@ def personalize_asset_plans(
 
 
 def save_user_plan_run(
-    user_id: int,
+    user_id: int | None,
     profile: Mapping[str, Any],
     personalized_plans: pd.DataFrame,
     source: str = "phase32a",
     db_path: str | Path = "data/app.db",
 ) -> int:
     """Persist an immutable personalized plan run and its asset rows."""
+    if user_id is None:
+        raise ValueError("An unlocked application user is required to save a plan")
     init_user_platform_db(db_path)
     normalized_profile = apply_profile_defaults(profile)
     plans = personalized_plans.copy() if isinstance(personalized_plans, pd.DataFrame) else pd.DataFrame(personalized_plans)
@@ -567,10 +688,11 @@ def save_user_plan_run(
                 """
                 INSERT INTO user_asset_plans (
                     plan_run_id, user_id, asset, plan_type, direction, goal_fit, risk_fit,
-                    evidence_grade, edge_status, personalized_plan, what_to_monitor,
+                    evidence_grade, edge_status, candidate_category, risk_label, cost_verdict,
+                    personalized_plan, what_to_monitor,
                     required_before_action, review_when, existing_position_guidance,
                     simulated_capital, saved_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -582,6 +704,9 @@ def save_user_plan_run(
                     str(values.get("RiskFit", "")),
                     str(values.get("EvidenceGrade", "Evidence unavailable")),
                     str(values.get("EdgeStatus", "Insufficient Evidence")),
+                    str(values.get("CandidateCategory", "Evidence unavailable")),
+                    str(values.get("RiskLabel", "Evidence unavailable")),
+                    str(values.get("CostVerdict", "Evidence unavailable")),
                     str(values.get("PersonalizedPlan", "")),
                     str(values.get("WhatToMonitor", "")),
                     str(values.get("RequiredBeforeAction", "")),
@@ -604,9 +729,11 @@ def save_user_plan_run(
 
 
 def load_latest_user_plan(
-    user_id: int, db_path: str | Path = "data/app.db"
+    user_id: int | None, db_path: str | Path = "data/app.db"
 ) -> pd.DataFrame:
     """Load the latest saved asset-plan rows for one demo user."""
+    if user_id is None:
+        return pd.DataFrame(columns=PERSONALIZED_PLAN_COLUMNS)
     init_user_platform_db(db_path)
     with _connect(db_path) as connection:
         run = connection.execute(
@@ -619,7 +746,9 @@ def load_latest_user_plan(
             """
             SELECT asset AS Asset, plan_type AS PlanType, direction AS Direction,
                    goal_fit AS GoalFit, risk_fit AS RiskFit, evidence_grade AS EvidenceGrade,
-                   edge_status AS EdgeStatus, personalized_plan AS PersonalizedPlan,
+                   edge_status AS EdgeStatus, candidate_category AS CandidateCategory,
+                   risk_label AS RiskLabel, cost_verdict AS CostVerdict,
+                   personalized_plan AS PersonalizedPlan,
                    what_to_monitor AS WhatToMonitor,
                    required_before_action AS RequiredBeforeAction,
                    review_when AS ReviewWhen,
@@ -634,9 +763,11 @@ def load_latest_user_plan(
 
 
 def list_user_plan_runs(
-    user_id: int, db_path: str | Path = "data/app.db"
+    user_id: int | None, db_path: str | Path = "data/app.db"
 ) -> pd.DataFrame:
     """List prior saved plan runs and their asset counts."""
+    if user_id is None:
+        return pd.DataFrame(columns=["PlanRunId", "SavedAt", "Source", "AssetCount"])
     init_user_platform_db(db_path)
     with _connect(db_path) as connection:
         return pd.read_sql_query(
@@ -658,6 +789,7 @@ __all__ = [
     "PLAN_TYPES",
     "PERSONALIZED_PLAN_COLUMNS",
     "init_user_platform_db",
+    "get_or_create_user_for_auth",
     "get_or_create_demo_user",
     "apply_profile_defaults",
     "save_user_profile",

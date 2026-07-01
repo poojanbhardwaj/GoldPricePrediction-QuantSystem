@@ -249,6 +249,40 @@ def render_professional_hero(
     )
 
 
+def render_product_topbar(
+    app_name: str,
+    mode_label: str,
+    user_label: Optional[str] = None,
+    is_unlocked: bool = False,
+    on_unlock: Optional[Any] = None,
+    on_logout: Optional[Any] = None,
+) -> None:
+    """Render a compact product identity and current-user control row."""
+    with st.container(border=True):
+        identity, controls = st.columns([4, 2])
+        with identity:
+            st.markdown(f"**{_safe(app_name)}**")
+            st.caption("Multi-Asset Research Platform")
+        with controls:
+            label_column, button_column = st.columns([1, 1])
+            with label_column:
+                st.caption(user_label or mode_label)
+            with button_column:
+                if is_unlocked:
+                    st.button(
+                        "Logout",
+                        key="product_topbar_logout",
+                        on_click=on_logout,
+                        width="stretch",
+                    )
+                else:
+                    st.button(
+                        "Continue as Demo User",
+                        key="product_topbar_unlock",
+                        on_click=on_unlock,
+                        width="stretch",
+                    )
+
 def render_metric_strip(cards: Sequence[Mapping[str, Any]]) -> None:
     """Render a compact strip of public metrics with explicit source subtitles."""
     if not cards:
@@ -733,6 +767,7 @@ def render_download_buttons(table_map: Mapping[str, Any]) -> None:
 
 __all__ = [
     "inject_premium_css", "render_premium_header", "render_hero_section", "render_professional_hero",
+    "render_product_topbar",
     "render_metric_strip", "render_feature_grid", "render_how_it_works", "render_trust_and_safety",
     "render_methodology_preview", "render_final_cta", "render_clean_footer", "render_status_badge",
     "render_confidence_badge", "render_opportunity_score", "render_metric_card", "render_status_card",
