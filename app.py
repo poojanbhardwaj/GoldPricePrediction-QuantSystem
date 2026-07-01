@@ -86,14 +86,20 @@ from src.evidence_of_edge import (
 )
 from src.user_platform import (
     apply_profile_defaults,
-    get_or_create_demo_user,
-    init_user_platform_db,
     list_user_plan_runs,
     load_latest_user_plan,
     load_user_profile,
     personalize_asset_plans,
     save_user_plan_run,
     save_user_profile,
+)
+from src.auth_manager import (
+    create_account_and_login,
+    get_current_auth_user,
+    is_user_unlocked,
+    login_with_password,
+    logout_current_user,
+    unlock_demo_user,
 )
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
@@ -195,6 +201,7 @@ from src.ui_components import (
     render_prediction_snapshot_card,
     render_premium_header,
     render_professional_hero,
+    render_product_topbar,
     render_research_disclaimer,
     render_risk_explanation_card,
     render_run_research_panel,
@@ -606,22 +613,22 @@ def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = Non
 
 
 def _is_user_unlocked() -> bool:
-    return bool(st.session_state.get("user_unlocked", False))
+    return is_user_unlocked()
 
 
 def _unlock_demo_user() -> None:
-    init_user_platform_db()
-    user = get_or_create_demo_user()
-    st.session_state.user_unlocked = True
-    st.session_state.demo_user_id = user["id"]
-    st.session_state.primary_product_navigation = "User Goals & Saved Plans"
+    # Backward-compatible test hook only. The public UI now requires app-account login.
+    unlock_demo_user()
+    st.rerun()
+
+
+def _open_login_page() -> None:
+    st.session_state.primary_product_navigation = "Login / Sign Up"
     st.rerun()
 
 
 def _logout_demo_user() -> None:
-    st.session_state.user_unlocked = False
-    st.session_state.demo_user_id = None
-    st.session_state.primary_product_navigation = "Market Research Assistant"
+    logout_current_user()
     st.rerun()
 
 
@@ -661,11 +668,11 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
     primary, secondary, spacer = st.columns([1, 1, 2])
     with primary:
         st.button(
-            "Continue as Demo User",
+            "Sign in / Create account",
             type="primary",
             width="stretch",
             key="public_unlock_top",
-            on_click=_unlock_demo_user,
+            on_click=_open_login_page,
         )
     with secondary:
         st.button(
@@ -675,18 +682,18 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
             on_click=_open_public_methodology,
         )
     with spacer:
-        st.caption("Demo access unlocks forecasts, evidence checks, and saved personalized plans.")
+        st.caption("Account access unlocks forecasts, evidence checks, and saved personalized plans.")
 
     st.markdown("### Public Market Snapshot")
     st.caption(
         "Current/cached prices and recent market movement. Forecasts, candidate watchlists, "
-        "evidence checks, and personalized saved plans unlock after demo access."
+        "evidence checks, and personalized saved plans unlock after app login."
     )
     frame = prices.copy() if isinstance(prices, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
         render_empty_state(
             "Public snapshot unavailable",
-            "No cached price rows are available. Continue in demo mode to review data diagnostics.",
+            "No cached price rows are available. Sign in to review data diagnostics.",
         )
     else:
         for start in range(0, len(frame), 3):
@@ -708,7 +715,7 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
                         ):
                             with change_column:
                                 st.metric(label, _public_number(row.get(field), "%"))
-                        st.caption("Forecast locked · Unlock forecasts and personalized plans in demo mode")
+                        st.caption("Forecast locked · Log in to unlock forecasts and personalized plans")
 
     st.markdown("### Research capabilities")
     render_feature_grid([
@@ -727,7 +734,7 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
         "Save a personalized paper-research plan",
     ])
     render_trust_and_safety([
-        {"title": "No broker credentials", "description": "Demo mode never asks for brokerage access details."},
+        {"title": "No broker credentials", "description": "The app never asks for brokerage access details."},
         {"title": "No real-money execution", "description": "The product records research and paper-tracking plans only."},
         {"title": "No return promises", "description": "Results remain uncertain and require confirmation."},
         {"title": "Clear data provenance", "description": "Stale, cached, saved, and refreshed snapshots stay visibly labeled."},
@@ -744,33 +751,76 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
     )
     render_final_cta(
         "Ready to build a personalized research plan?",
-        "Continue in demo mode to refresh research, inspect evidence, and save goal-based paper-research plans.",
+        "Create an app account or sign in to refresh research, inspect evidence, and save goal-based paper-research plans.",
     )
     st.button(
-        "Continue as Demo User",
+        "Sign in / Create account",
         type="primary",
         key="public_unlock_final",
-        on_click=_unlock_demo_user,
+        on_click=_open_login_page,
     )
     render_clean_footer()
 
 
 def _render_unlock_prompt() -> None:
     render_professional_hero(
-        "Unlock personalized research plans",
-        "Use demo mode to save goals, generate personalized paper-research plans, and review candidate/evidence history.",
-        badges=("Demo user", "Research-only", "Paper-tracking"),
+        "Access your research workspace",
+        "Create an app account or sign in to save goals, generate personalized paper-research plans, and review evidence-aware watchlists.",
+        badges=("App login", "Research-only", "Paper-tracking"),
     )
     st.warning(
         "Do not enter broker, bank, trading-account credentials, or API secrets. This app is research-only."
     )
-    st.button(
-        "Continue as Demo User",
-        type="primary",
-        key="gated_page_unlock",
-        on_click=_unlock_demo_user,
-    )
 
+    st.markdown("### Sign in or Create account")
+    st.caption("Use your app account only. Never enter broker, bank, trading-account credentials, or API secrets.")
+
+    signin_tab, signup_tab = st.tabs(["Sign in", "Create account"])
+    with signin_tab:
+        with st.form("local_password_signin_form"):
+            email = st.text_input("Email", key="signin_email")
+            password = st.text_input("Password", type="password", key="signin_password")
+            submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
+        if submitted:
+            try:
+                login_with_password(email, password)
+                st.success("Signed in. Opening your research workspace.")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    with signup_tab:
+        with st.form("local_password_signup_form"):
+            display_name = st.text_input("Name", key="signup_name")
+            email = st.text_input("Email", key="signup_email")
+            password = st.text_input("Create password", type="password", key="signup_password")
+            confirm_password = st.text_input("Confirm password", type="password", key="signup_confirm_password")
+            acknowledge = st.checkbox(
+                "I understand this is a research-only app and not a real-money trading system.",
+                key="signup_research_only_ack",
+            )
+            submitted = st.form_submit_button("Create account", type="primary", width="stretch")
+        if submitted:
+            if password != confirm_password:
+                st.error("Passwords do not match.")
+            elif not acknowledge:
+                st.error("Please acknowledge the research-only safety notice before creating an account.")
+            else:
+                try:
+                    create_account_and_login(email, password, display_name or None)
+                    st.success("Account created. Opening your research workspace.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+    with st.container(border=True):
+        st.markdown("### What your account unlocks")
+        st.write(
+            "Your saved profile, personalized research plans, watchlist reviews, and future research history stay tied to your app user account."
+        )
+        st.caption(
+            "Passwords are stored as salted hashes. Broker, bank, trading-account credentials, and API secrets are never collected."
+        )
 
 def _status_card_style(status: str) -> str:
     return {
@@ -1106,18 +1156,17 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
 
 
 def _render_user_goals_saved_plans() -> None:
-    try:
-        init_user_platform_db()
-        user = get_or_create_demo_user()
-    except Exception as exc:
-        render_empty_state(
-            "Local plan storage is unavailable",
-            f"The demo-user database could not be opened: {exc}",
-        )
+    current_user = get_current_auth_user()
+    if not current_user.is_authenticated or current_user.app_user_id is None:
+        st.info("Log in to save a user-owned profile or personalized plan.")
+        _render_unlock_prompt()
         return
+    user_id = int(current_user.app_user_id)
 
-    saved_profile = load_user_profile(int(user["id"]))
-    profile = apply_profile_defaults(saved_profile or {"name": user.get("name", "Demo User")})
+    saved_profile = load_user_profile(user_id)
+    profile = apply_profile_defaults(
+        saved_profile or {"name": current_user.display_name}
+    )
     supported_assets = get_supported_assets()
 
     experience_options = ["Beginner", "Intermediate", "Advanced", "I don't know"]
@@ -1223,8 +1272,8 @@ def _render_user_goals_saved_plans() -> None:
     })
 
     if save_clicked or generate_clicked:
-        save_user_profile(int(user["id"]), profile_input)
-        st.success("Demo profile saved locally.")
+        save_user_profile(user_id, profile_input)
+        st.success("Research profile saved for the current user.")
 
     generated_plans = pd.DataFrame()
     if generate_clicked:
@@ -1262,7 +1311,7 @@ def _render_user_goals_saved_plans() -> None:
             validation_metrics=validation_metrics,
         )
         generated_plans = personalize_asset_plans(profile_input, watchlist, edge_table)
-        save_user_plan_run(int(user["id"]), profile_input, generated_plans)
+        save_user_plan_run(user_id, profile_input, generated_plans)
         st.session_state.phase32a_personalized_plans = generated_plans
         st.success("Personalized paper-research plan saved.")
 
@@ -1271,7 +1320,7 @@ def _render_user_goals_saved_plans() -> None:
         session_plans = st.session_state.get("phase32a_personalized_plans")
         active_plans = session_plans if isinstance(session_plans, pd.DataFrame) else pd.DataFrame()
     if active_plans.empty:
-        active_plans = load_latest_user_plan(int(user["id"]))
+        active_plans = load_latest_user_plan(user_id)
 
     render_section_header(
         "Latest saved plan",
@@ -1323,8 +1372,8 @@ def _render_user_goals_saved_plans() -> None:
             "Personalized research plan": (active_plans, "personalized_research_plan.csv"),
         })
 
-    plan_runs = list_user_plan_runs(int(user["id"]))
-    render_section_header("Previous plan runs", "Saved locally for the demo user so research can be reviewed over time.")
+    plan_runs = list_user_plan_runs(user_id)
+    render_section_header("Previous plan runs", "Saved locally for the current user so research can be reviewed over time.")
     if plan_runs.empty:
         st.info("No previous plan runs are saved yet.")
     else:
@@ -1617,11 +1666,11 @@ if not st.session_state.get("saved_research_state_hydrated", False):
 
 st.sidebar.markdown("## Quant Research Lab")
 if _is_user_unlocked():
-    st.sidebar.success("Demo user active")
-    st.sidebar.button("Logout", key="sidebar_demo_logout", on_click=_logout_demo_user)
+    st.sidebar.success("App account active")
+    st.sidebar.caption("Use the top-right product bar to log out.")
 else:
     st.sidebar.info("Public preview mode")
-    st.sidebar.button("Unlock demo", key="sidebar_demo_unlock", on_click=_unlock_demo_user)
+    st.sidebar.caption("Use the top-right product bar to sign in or create an account.")
 st.sidebar.markdown("---")
 
 NAVIGATION_GROUPS = {
@@ -1696,7 +1745,7 @@ NAVIGATION_GROUPS = {
 LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
 PUBLIC_PRODUCT_PAGES = [
     "Market Research Assistant",
-    "Login / Unlock Demo",
+    "Login / Sign Up",
     "About / Methodology",
 ]
 PRIMARY_PRODUCT_PAGES = [
@@ -1772,7 +1821,19 @@ if _is_user_unlocked() and _asset_mismatch(selected_asset):
     )
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Research assistant | Real-money decisions disabled")
+st.sidebar.caption("Research assistant | Login required for workspace")
+
+
+current_auth_user = get_current_auth_user()
+render_product_topbar(
+    app_name="Quant Research Lab",
+    mode_label="App account active" if current_auth_user.is_authenticated else "Public preview",
+    user_label=current_auth_user.display_name if current_auth_user.is_authenticated else "Public preview",
+    is_unlocked=current_auth_user.is_authenticated,
+    on_unlock=_open_login_page,
+    on_logout=_logout_demo_user,
+)
+
 
 if is_advanced_diagnostic:
     st.info("Advanced diagnostic page. Normal users should use Market Research Assistant or Asset Plans first.")
@@ -1782,13 +1843,13 @@ if is_advanced_diagnostic:
 # PAGE: HOME
 # ════════════════════════════════════════════════════════════════
 
-if page == "Login / Unlock Demo":
+if page == "Login / Sign Up":
     _render_unlock_prompt()
     render_clean_footer()
     st.stop()
 
 if not _is_user_unlocked() and (page in GATED_PRODUCT_PAGES or is_advanced_diagnostic):
-    st.info("Unlock demo mode to access this research page.")
+    st.info("Log in to access this research page.")
     _render_unlock_prompt()
     st.stop()
 
@@ -2075,7 +2136,7 @@ elif page == "Evidence of Edge":
 
 elif page == "User Goals & Saved Plans":
     render_hero_section(
-        "Demo user mode",
+        "App account mode",
         "User Goals & Saved Plans",
         "Create a personalized paper-research plan without needing to understand every quant metric.",
     )

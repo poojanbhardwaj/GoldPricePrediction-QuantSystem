@@ -247,7 +247,7 @@ def test_app_navigation_places_user_goals_after_evidence_of_edge():
     assert navigation.index('"Evidence of Edge"') < navigation.index('"User Goals & Saved Plans"')
     assert navigation.index('"User Goals & Saved Plans"') < navigation.index('"Asset Plans"')
     assert "_render_user_goals_saved_plans()" in page_block
-    assert "Demo user mode" in page_block
+    assert "App account mode" in page_block
 
 
 def test_user_page_has_no_credential_collection_fields():
@@ -255,6 +255,9 @@ def test_user_page_has_no_credential_collection_fields():
     platform_source = (ROOT / "src" / "user_platform.py").read_text(encoding="utf-8")
     combined = app_source + platform_source
 
-    assert re.search(r"(?:text_input|number_input)\([^\n]*(?:password|broker|bank account)", combined, re.IGNORECASE) is None
-    assert "password_hash" not in platform_source
+    assert re.search(r"(?:text_input|number_input)\([^\n]*(?:broker|bank account|trading-account|API secret|api secret)", combined, re.IGNORECASE) is None
+    assert "type=\"password\"" in app_source
+    assert "password_hash" in platform_source
+    assert "pbkdf2" in platform_source.lower()
+    assert "plaintext_password" not in platform_source
 
