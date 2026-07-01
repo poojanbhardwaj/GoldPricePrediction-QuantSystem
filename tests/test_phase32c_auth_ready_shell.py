@@ -93,6 +93,36 @@ def test_local_account_creation_stores_hash_not_plaintext(tmp_path):
     assert int(row[2]) >= 100_000
 
 
+def test_local_account_rejects_invalid_email_formats(tmp_path):
+    db_path = tmp_path / "email_validation.db"
+    invalid_emails = [
+        "",
+        "poojan",
+        "poojan@",
+        "@gmail.com",
+        "poojan@gmail",
+        "poojan@gmail.",
+        "poojan@.com",
+        "poojan@@gmail.com",
+        "poojan@gmail..com",
+        "poojan@-gmail.com",
+        "poojan@gmail.c",
+        "poojan gmail@gmail.com",
+    ]
+
+    for email in invalid_emails:
+        with pytest.raises(ValueError):
+            create_password_user(email, "StrongPass123", "Poojan", db_path=db_path)
+
+    user = create_password_user(
+        "  Poojan.Test+1@Gmail.COM  ",
+        "StrongPass123",
+        "Poojan",
+        db_path=db_path,
+    )
+    assert user["email"] == "poojan.test+1@gmail.com"
+
+
 def test_local_password_authentication_and_bad_password(tmp_path):
     db_path = tmp_path / "app.db"
     created = create_password_user(

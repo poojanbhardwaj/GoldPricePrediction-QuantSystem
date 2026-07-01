@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sqlite3
 from datetime import datetime, timezone
@@ -55,12 +56,44 @@ def _now() -> str:
 
 PASSWORD_HASH_ITERATIONS = 210_000
 MIN_PASSWORD_LENGTH = 8
+EMAIL_PATTERN = re.compile(
+    r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?"
+    r"(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+$",
+    re.IGNORECASE,
+)
+
 
 
 def _normalize_email(email: str) -> str:
+    """Normalize and validate an app-account email address.
+
+    This validates format only. Ownership verification should be added later
+    through a real email-verification provider such as Supabase/Auth0/SMTP OTP.
+    """
     value = str(email or "").strip().lower()
-    if "@" not in value or value.startswith("@") or value.endswith("@"):
-        raise ValueError("A valid email address is required")
+
+    if (
+        not value
+        or len(value) > 254
+        or value.count("@") != 1
+        or ".." in value
+        or not EMAIL_PATTERN.fullmatch(value)
+    ):
+        raise ValueError("Enter a valid email address, for example name@example.com")
+
+    local_part, domain = value.split("@", 1)
+    top_level_domain = domain.rsplit(".", 1)[-1]
+
+    if (
+        not local_part
+        or len(local_part) > 64
+        or not domain
+        or len(top_level_domain) < 2
+        or not top_level_domain.isalpha()
+    ):
+        raise ValueError("Enter a valid email address, for example name@example.com")
+
     return value
 
 
