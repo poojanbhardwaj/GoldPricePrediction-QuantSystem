@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +49,43 @@ PERSONALIZED_PLAN_COLUMNS = [
 
 def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+
+
+PASSWORD_HASH_ITERATIONS = 210_000
+MIN_PASSWORD_LENGTH = 8
+
+
+def _normalize_email(email: str) -> str:
+    value = str(email or "").strip().lower()
+    if "@" not in value or value.startswith("@") or value.endswith("@"):
+        raise ValueError("A valid email address is required")
+    return value
+
+
+def _validate_password(password: str) -> str:
+    value = str(password or "")
+    if len(value) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    return value
+
+
+def _hash_password(password: str, *, salt_hex: str | None = None, iterations: int = PASSWORD_HASH_ITERATIONS) -> tuple[str, str, int]:
+    value = _validate_password(password)
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", value.encode("utf-8"), salt, int(iterations))
+    return salt.hex(), digest.hex(), int(iterations)
+
+
+def _verify_password(password: str, *, salt_hex: str, password_hash: str, iterations: int | None) -> bool:
+    if not salt_hex or not password_hash:
+        return False
+    try:
+        _, candidate, _ = _hash_password(password, salt_hex=salt_hex, iterations=int(iterations or PASSWORD_HASH_ITERATIONS))
+    except Exception:
+        return False
+    return hmac.compare_digest(candidate, str(password_hash))
 
 
 def _database_path(db_path: str | Path) -> str:
@@ -153,6 +193,10 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
             ("display_name", "TEXT"),
             ("is_demo", "INTEGER NOT NULL DEFAULT 0"),
             ("last_active_at", "TEXT"),
+            ("password_salt", "TEXT"),
+            ("password_hash", "TEXT"),
+            ("password_iterations", "INTEGER"),
+            ("password_updated_at", "TEXT"),
         ):
             _ensure_column(connection, "users", column, definition)
         for column in ("candidate_category", "risk_label", "cost_verdict"):
@@ -258,6 +302,93 @@ def get_or_create_demo_user(db_path: str | Path = "data/app.db") -> dict[str, An
         is_demo=True,
         db_path=db_path,
     )
+
+
+def create_password_user(
+    email: str,
+    password: str,
+    display_name: str | None = None,
+    db_path: str | Path = "data/app.db",
+) -> dict[str, Any]:
+    """Create a local email/password user with a salted PBKDF2 hash.
+
+    This is an app-account login only. It never stores plaintext passwords and
+    never asks for broker, bank, or trading credentials.
+    """
+    normalized_email = _normalize_email(email)
+    salt_hex, password_hash, iterations = _hash_password(password)
+    timestamp = _now()
+    name = str(display_name or normalized_email.split("@")[0] or "Research User").strip()
+    init_user_platform_db(db_path)
+    with _connect(db_path) as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE email = ?", (normalized_email,)
+        ).fetchone()
+        if existing is not None:
+            raise ValueError("An account already exists for this email. Please sign in.")
+        cursor = connection.execute(
+            """
+            INSERT INTO users (
+                email, name, created_at, updated_at, auth_provider, auth_user_id,
+                display_name, is_demo, last_active_at, password_salt, password_hash,
+                password_iterations, password_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_email, name, timestamp, timestamp, "local_password",
+                normalized_email, name, 0, timestamp, salt_hex, password_hash,
+                iterations, timestamp,
+            ),
+        )
+        user_id = int(cursor.lastrowid)
+        row = connection.execute(
+            """
+            SELECT id, email, name, auth_provider, auth_user_id, display_name,
+                   is_demo, created_at, last_active_at
+            FROM users WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    result = dict(row) if row is not None else {}
+    result["is_demo"] = bool(result.get("is_demo", False))
+    return result
+
+
+def authenticate_password_user(
+    email: str,
+    password: str,
+    db_path: str | Path = "data/app.db",
+) -> dict[str, Any]:
+    """Authenticate a local app account using a salted password hash."""
+    normalized_email = _normalize_email(email)
+    init_user_platform_db(db_path)
+    timestamp = _now()
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT id, email, name, auth_provider, auth_user_id, display_name, is_demo,
+                   created_at, last_active_at, password_salt, password_hash, password_iterations
+            FROM users WHERE email = ? AND auth_provider = 'local_password'
+            """,
+            (normalized_email,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("No account found for this email. Create an account first.")
+        if not _verify_password(
+            password,
+            salt_hex=str(row["password_salt"] or ""),
+            password_hash=str(row["password_hash"] or ""),
+            iterations=row["password_iterations"],
+        ):
+            raise ValueError("Invalid email or password.")
+        connection.execute(
+            "UPDATE users SET last_active_at = ?, updated_at = ? WHERE id = ?",
+            (timestamp, timestamp, int(row["id"])),
+        )
+    result = {k: row[k] for k in row.keys() if not str(k).startswith("password_")}
+    result["last_active_at"] = timestamp
+    result["is_demo"] = bool(result.get("is_demo", False))
+    return result
 
 
 def _is_unsure(value: Any) -> bool:
@@ -791,6 +922,8 @@ __all__ = [
     "init_user_platform_db",
     "get_or_create_user_for_auth",
     "get_or_create_demo_user",
+    "create_password_user",
+    "authenticate_password_user",
     "apply_profile_defaults",
     "save_user_profile",
     "load_user_profile",

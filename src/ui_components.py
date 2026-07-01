@@ -277,7 +277,7 @@ def render_product_topbar(
                     )
                 else:
                     st.button(
-                        "Continue as Demo User",
+                        "Sign in / Create account",
                         key="product_topbar_unlock",
                         on_click=on_unlock,
                         width="stretch",
