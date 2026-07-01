@@ -38,6 +38,7 @@ def _helpers(state: _SessionState, saved_snapshot: pd.DataFrame):
         "_get_phase29_snapshot",
         "_store_phase29_run_report",
         "_phase29_placeholder_snapshot",
+        "_phase29_public_source_labels",
     }
     functions = [
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names
@@ -130,6 +131,20 @@ def test_placeholder_is_created_only_after_all_real_sources_fail():
     assert helpers["_has_real_phase29_predictions"](placeholder) is False
 
 
+def test_public_source_labels_distinguish_saved_cached_and_refreshed_values():
+    helpers = _helpers(_SessionState(), pd.DataFrame())
+    labels = helpers["_phase29_public_source_labels"]
+
+    assert labels("saved_artifact") == ("Saved research snapshot", "Cached dataset price")
+    assert labels("last_good") == ("Saved research snapshot", "Cached dataset price")
+    assert labels("session", {"PriceDisplaySource": "Cached dataset price"}) == (
+        "Latest refreshed research", "Cached dataset price"
+    )
+    assert labels("session", {"PriceDisplaySource": "Latest refreshed research"}) == (
+        "Latest refreshed research", "Latest refreshed research"
+    )
+
+
 def test_market_assistant_warns_before_rendering_placeholder_and_has_diagnostics():
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     page_block = source.split('if page == "Market Research Assistant":', 1)[1].split(
@@ -137,7 +152,7 @@ def test_market_assistant_warns_before_rendering_placeholder_and_has_diagnostics
     )[0]
 
     assert (
-        "Prediction snapshot unavailable. Showing current prices only. Run Full Research or "
+        "Prediction snapshot unavailable. Showing current prices only. Refresh / rebuild the "
         in page_block
     )
     assert 'st.expander("Research snapshot diagnostics"' in page_block
@@ -156,7 +171,7 @@ def test_incomplete_full_research_run_keeps_saved_predictions_visible():
         return_value=incomplete_report,
     ):
         app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run(timeout=90)
-        next(button for button in app.button if button.label == "Run Full Research").click().run(
+        next(button for button in app.button if button.label == "Refresh / Rebuild Research").click().run(
             timeout=90
         )
 

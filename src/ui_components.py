@@ -423,13 +423,16 @@ def render_asset_price_card(row: Mapping[str, Any]) -> None:
     style = _STATUS_STYLES.get(status.casefold(), "neutral")
     price = _fmt_number(data.get("LatestPrice"), digits=2)
     score = _fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100")
-    predicted = _fmt_number(data.get("PredictedPrice"), digits=2, missing="Run research")
+    predicted = _fmt_number(data.get("PredictedPrice"), digits=2, missing="Estimate unavailable")
     move = _fmt_number(data.get("PredictedMovePct"), suffix="%", missing="No saved estimate")
+    research_source = data.get("ResearchSourceLabel", "Research source unavailable")
+    price_source = data.get("PriceSourceLabel", "Price source unavailable")
     st.markdown(
         f'<article class="asset-price-card"><div class="card-top"><span class="asset-name">{_safe(data.get("Asset", "Asset"))}</span>'
         f'<span class="status-badge {style}">{_safe(_display_label(status))}</span></div>'
         f'<div class="latest-price">{price}</div><div class="as-of">{_safe(data.get("LatestPriceDate", "No date"))} · '
         f'{_safe(_display_label(data.get("DataFreshness", "Unknown")))}</div>'
+        f'<div class="as-of">{_safe(research_source)} · {_safe(price_source)}</div>'
         f'<div class="number-strip"><div><span>1D change</span><strong>{_fmt_number(data.get("Change1D_pct"), suffix="%")}</strong></div>'
         f'<div><span>5D change</span><strong>{_fmt_number(data.get("Change5D_pct"), suffix="%")}</strong></div>'
         f'<div><span>30D change</span><strong>{_fmt_number(data.get("Change30D_pct"), suffix="%")}</strong></div></div>'
@@ -444,11 +447,14 @@ def render_asset_price_card(row: Mapping[str, Any]) -> None:
 
 def render_prediction_snapshot_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
+    research_source = data.get("ResearchSourceLabel", "Research source unavailable")
+    price_source = data.get("PriceSourceLabel", "Price source unavailable")
     st.markdown(
         f'<div class="prediction-card"><h3>{_safe(data.get("Asset", "Asset"))} · {_safe(data.get("BestHorizon", ""))}D estimate</h3>'
         f'<div class="number-strip"><div><span>Current</span><strong>{_fmt_number(data.get("LatestPrice"), missing="Price unavailable")}</strong></div>'
-        f'<div><span>Predicted</span><strong>{_fmt_number(data.get("PredictedPrice"), missing="Run Full Research first")}</strong></div>'
+        f'<div><span>Predicted</span><strong>{_fmt_number(data.get("PredictedPrice"), missing="No saved estimate")}</strong></div>'
         f'<div><span>Move</span><strong>{_fmt_number(data.get("PredictedMovePct"), suffix="%", missing="No saved estimate for this horizon yet")}</strong></div></div>'
+        f'<p>{_safe(research_source)} · {_safe(price_source)} · as of {_safe(data.get("LatestPriceDate", "date unavailable"))}.</p>'
         f'<p>Uncertainty: {_safe(data.get("PredictionUncertaintyLabel", "Unavailable"))}. Forecast evidence is one input and remains insufficient on its own.</p></div>',
         unsafe_allow_html=True,
     )
@@ -508,13 +514,21 @@ def render_simple_plan_card(row: Mapping[str, Any]) -> None:
 def render_research_launch_panel(snapshot_source: str = "missing") -> None:
     if snapshot_source == "saved":
         message = (
-            "Showing saved research snapshot from the latest checked-in demo run. "
-            "Click Run Full Research to refresh it in this session."
+            "Saved research snapshot is visible from the latest checked-in research run; these "
+            "values are not live. Select Refresh / Rebuild Research to update the session snapshot."
+        )
+    elif snapshot_source == "session":
+        message = (
+            "Latest refreshed research is visible for this session. Source dates remain shown on "
+            "each card, and the values should not be interpreted as live quotes."
         )
     else:
-        message = "Prices, forecasts, risk, benchmarks, costs, scores, and simple plans are combined after you start the run."
+        message = (
+            "Cached dataset prices may appear before a complete research snapshot is available. "
+            "Use Refresh / Rebuild Research to generate or update forecasts, risk, benchmarks, costs, and plans."
+        )
     st.markdown(
-        '<div class="run-research-panel"><div><h3>Build the complete user snapshot</h3>'
+        '<div class="run-research-panel"><div><h3>Refresh or rebuild the research snapshot</h3>'
         f'<p>{_safe(message)}</p></div>'
         '<div class="steps">Prices → forecasts → risk → benchmarks → costs → plans</div></div>',
         unsafe_allow_html=True,

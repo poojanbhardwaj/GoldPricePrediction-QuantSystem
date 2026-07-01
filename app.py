@@ -364,6 +364,30 @@ def _safe_phase29_warning(value: object) -> str:
     return text[:1000]
 
 
+def _phase29_public_source_labels(
+    snapshot_source: object,
+    report: object = None,
+) -> tuple[str, str]:
+    """Return plain-language research and price provenance labels."""
+    source = str(snapshot_source or "placeholder")
+    if source == "session":
+        research_label = "Latest refreshed research"
+    elif source in {"saved_artifact", "last_good"}:
+        research_label = "Saved research snapshot"
+    else:
+        research_label = "Research snapshot unavailable"
+
+    report_data = report if isinstance(report, dict) else {}
+    price_label = str(report_data.get("PriceDisplaySource", ""))
+    if price_label not in {"Cached dataset price", "Latest refreshed research"}:
+        price_label = (
+            "Latest refreshed research"
+            if source == "session"
+            else "Cached dataset price"
+        )
+    return research_label, price_label
+
+
 def _get_phase29_snapshot() -> pd.DataFrame:
     """Load the freshest valid Phase 29 snapshot without manufacturing placeholders."""
     report = st.session_state.get("phase29_user_report")
@@ -527,6 +551,7 @@ def _hydrate_saved_research_state() -> None:
             hydrated_report["CostAwarePlans"] = phase29_cost_plans
             hydrated_report["CostAwareAssetPlans"] = phase29_cost_plans
         hydrated_report["SnapshotSource"] = "Checked-in saved research demo"
+        hydrated_report["PriceDisplaySource"] = "Cached dataset price"
         st.session_state.phase29_user_report = hydrated_report
 
     for state_key, table in (
@@ -552,7 +577,7 @@ def _phase29_placeholder_snapshot(prices: pd.DataFrame) -> pd.DataFrame:
         "BestHorizon": 0, "PredictedPrice": np.nan, "PredictedMovePct": np.nan,
         "Status": "Not Enough Evidence", "OpportunityScore": 0.0, "OpportunityGrade": "F",
         "RiskLabel": "Not Enough Evidence", "CostVerdict": "MissingEstimate",
-        "PassiveBenchmarkName": "Passive benchmark pending", "SimplePlan": "Run Full Research to build a complete paper-research plan.",
+        "PassiveBenchmarkName": "Passive benchmark pending", "SimplePlan": "Refresh / rebuild research to create a complete paper-research plan.",
     }
     for column, value in defaults.items():
         frame[column] = value
@@ -623,7 +648,7 @@ def _render_asset_plan_cards(plans: pd.DataFrame, *, show_advanced: bool = False
 
 def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
     if not isinstance(snapshot, pd.DataFrame) or snapshot.empty:
-        render_empty_state("No final snapshot", "Use Run Full Research to combine prices, saved estimates, risk, benchmarks, and costs.")
+        render_empty_state("No final snapshot", "Refresh / rebuild research to combine prices, saved estimates, risk, benchmarks, and costs.")
         return
 
     render_section_header(
@@ -1558,14 +1583,16 @@ if page == "Market Research Assistant":
     render_hero_section(
         "Multi-Asset Research Intelligence",
         "Track market ideas with forecasts, costs, risk, and benchmarks in one place",
-        "Run the research engine, compare active estimates against passive benchmarks, and get a simple paper-research plan.",
+        "Review saved research immediately, then refresh or rebuild it to update forecasts, costs, risk, and benchmarks.",
     )
     render_disclaimer_banner()
     render_blocked_capital_banner()
 
     hero_a, hero_b, hero_c, hero_d = st.columns(4)
     with hero_a:
-        run_full_clicked = st.button("Run Full Research", type="primary", width="stretch", key="phase29_run_full")
+        run_full_clicked = st.button(
+            "Refresh / Rebuild Research", type="primary", width="stretch", key="phase29_run_full"
+        )
     with hero_b:
         refresh_market_clicked = st.button("Refresh Market Data", width="stretch", key="phase29_refresh_market")
     with hero_c:
@@ -1582,12 +1609,10 @@ if page == "Market Research Assistant":
         )
 
     initial_phase29_snapshot = _get_phase29_snapshot()
-    initial_phase29_report = st.session_state.get("phase29_user_report")
-    if isinstance(initial_phase29_report, dict) and initial_phase29_report.get("SnapshotSource") == "Checked-in saved research demo":
+    initial_snapshot_source = st.session_state.get("phase29_snapshot_source", "placeholder")
+    if initial_snapshot_source in {"saved_artifact", "last_good"}:
         launch_snapshot_source = "saved"
-    elif isinstance(initial_phase29_report, dict) and _has_real_phase29_predictions(
-        initial_phase29_report.get("AllAssetPredictionSnapshot")
-    ):
+    elif initial_snapshot_source == "session":
         launch_snapshot_source = "session"
     elif _has_real_phase29_predictions(initial_phase29_snapshot):
         launch_snapshot_source = "saved"
@@ -1607,6 +1632,10 @@ if page == "Market Research Assistant":
                     amount=10000, cost_assumptions=default_cost_assumptions(),
                     refresh=bool(refresh_market_clicked),
                 ))
+                phase29_report["PriceDisplaySource"] = (
+                    "Latest refreshed research" if refresh_market_clicked else "Cached dataset price"
+                )
+                st.session_state.phase29_user_report = phase29_report
                 st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
                 st.session_state.phase26_asset_plans = phase29_report.get("AssetPlans")
                 _latest_user_price_snapshot.clear()
@@ -1623,16 +1652,22 @@ if page == "Market Research Assistant":
     phase29_snapshot = _get_phase29_snapshot()
     if not _has_real_phase29_predictions(phase29_snapshot):
         st.warning(
-            "Prediction snapshot unavailable. Showing current prices only. Run Full Research or "
-            "check saved forecast artifacts."
+            "Prediction snapshot unavailable. Showing current prices only. Refresh / rebuild the "
+            "research snapshot or check saved forecast artifacts."
         )
         st.session_state.phase29_snapshot_source = "placeholder"
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
     elif st.session_state.get("phase29_snapshot_notice"):
         st.warning(str(st.session_state.phase29_snapshot_notice))
+    latest_report = st.session_state.get("phase29_user_report")
+    research_source_label, price_source_label = _phase29_public_source_labels(
+        st.session_state.get("phase29_snapshot_source", "placeholder"), latest_report
+    )
+    phase29_snapshot = phase29_snapshot.copy()
+    phase29_snapshot["ResearchSourceLabel"] = research_source_label
+    phase29_snapshot["PriceSourceLabel"] = price_source_label
     _render_phase29_snapshot(phase29_snapshot)
 
-    latest_report = st.session_state.get("phase29_user_report")
     latest_warnings = latest_report.get("Warnings", []) if isinstance(latest_report, dict) else []
     if isinstance(latest_warnings, str):
         latest_warnings = [latest_warnings]
@@ -1647,6 +1682,8 @@ if page == "Market Research Assistant":
     with st.expander("Research snapshot diagnostics", expanded=False):
         st.dataframe(pd.DataFrame([{
             "SourceUsed": st.session_state.get("phase29_snapshot_source", "placeholder"),
+            "ResearchSourceLabel": research_source_label,
+            "PriceSourceLabel": price_source_label,
             "RowCount": int(len(phase29_snapshot)),
             "NumericPredictedPrices": numeric_prices,
             "NumericPredictedMoves": numeric_moves,

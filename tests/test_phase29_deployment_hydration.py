@@ -76,16 +76,13 @@ def test_research_launch_panel_accepts_snapshot_source_positionally():
         render_run_research_panel("saved")
         saved_html = str(markdown.call_args.args[0])
         assert (
-            "Showing saved research snapshot from the latest checked-in demo run. "
-            "Click Run Full Research to refresh it in this session."
+            "Saved research snapshot is visible from the latest checked-in research run; these "
+            "values are not live. Select Refresh / Rebuild Research to update the session snapshot."
         ) in saved_html
 
         render_run_research_panel("session")
         default_html = str(markdown.call_args.args[0])
-        assert (
-            "Prices, forecasts, risk, benchmarks, costs, scores, and simple plans are combined "
-            "after you start the run."
-        ) in default_html
+        assert "Latest refreshed research is visible for this session." in default_html
 
 
 def test_deployment_demo_artifacts_are_narrowly_allowlisted():
@@ -128,7 +125,11 @@ def test_clean_session_hydrates_saved_research_and_phase29_fallback_views():
     assert not app.session_state["phase26_research_snapshot"].empty
 
     main_content = "\n".join(str(item.value) for item in app.markdown)
-    assert "Showing saved research snapshot from the latest checked-in demo run" in main_content
+    assert "Saved research snapshot is visible from the latest checked-in research run" in main_content
+    assert "Saved research snapshot" in main_content
+    assert "Cached dataset price" in main_content
+    assert str(first_row["LatestPriceDate"]) in main_content
+    assert "Refresh / Rebuild Research" in [button.label for button in app.button]
     assert expected_price in main_content
     assert expected_move in main_content
     assert "Run research" not in main_content

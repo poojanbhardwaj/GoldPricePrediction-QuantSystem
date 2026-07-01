@@ -234,9 +234,8 @@ def test_generated_outputs_have_no_forbidden_claims_or_execution_approval():
 def test_phase29_app_has_primary_routes_and_compiles():
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     ast.parse(source)
-    assert '"Run Full Research"' in source
+    assert '"Refresh / Rebuild Research"' in source
     assert '"Cost-Aware Plan"' in source
     assert '"Paper Research Journey"' in source
     assert "explorer_target = get_asset_target(explorer_asset)" in source
     assert "Advanced Diagnostics" in source
-
