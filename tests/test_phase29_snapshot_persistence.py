@@ -170,7 +170,9 @@ def test_incomplete_full_research_run_keeps_saved_predictions_visible():
         "src.final_user_dashboard.run_full_user_research",
         return_value=incomplete_report,
     ):
-        app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run(timeout=90)
+        app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90)
+        app.session_state["user_unlocked"] = True
+        app.run(timeout=90)
         next(button for button in app.button if button.label == "Refresh / Rebuild Research").click().run(
             timeout=90
         )

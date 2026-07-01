@@ -174,13 +174,19 @@ from src.ui_components import (
     render_blocked_capital_banner,
     render_cost_assumption_inputs,
     render_cost_summary_card,
+    render_clean_footer,
     render_disclaimer_banner,
     render_download_buttons,
     render_empty_state,
     render_glass_container,
     render_glossary_expander,
+    render_feature_grid,
+    render_final_cta,
     render_hero_section,
+    render_how_it_works,
+    render_methodology_preview,
     render_metric_grid,
+    render_metric_strip,
     render_market_snapshot_grid,
     render_monitoring_card,
     render_navigation_card,
@@ -188,6 +194,7 @@ from src.ui_components import (
     render_pipeline_stepper,
     render_prediction_snapshot_card,
     render_premium_header,
+    render_professional_hero,
     render_research_disclaimer,
     render_risk_explanation_card,
     render_run_research_panel,
@@ -195,6 +202,7 @@ from src.ui_components import (
     render_section_header,
     render_status_card,
     render_status_tabs,
+    render_trust_and_safety,
     render_score_explainer_card,
     render_simple_plan_card,
 )
@@ -595,6 +603,173 @@ def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = Non
     """Preserve plan context while moving between primary user pages."""
     set_plan_navigation_state(st.session_state, asset, destination, horizon)
     st.rerun()
+
+
+def _is_user_unlocked() -> bool:
+    return bool(st.session_state.get("user_unlocked", False))
+
+
+def _unlock_demo_user() -> None:
+    init_user_platform_db()
+    user = get_or_create_demo_user()
+    st.session_state.user_unlocked = True
+    st.session_state.demo_user_id = user["id"]
+    st.session_state.primary_product_navigation = "User Goals & Saved Plans"
+    st.rerun()
+
+
+def _logout_demo_user() -> None:
+    st.session_state.user_unlocked = False
+    st.session_state.demo_user_id = None
+    st.session_state.primary_product_navigation = "Market Research Assistant"
+    st.rerun()
+
+
+def _open_public_methodology() -> None:
+    st.session_state.primary_product_navigation = "About / Methodology"
+    st.rerun()
+
+
+def _public_market_snapshot() -> pd.DataFrame:
+    """Return price-only public rows with honest saved/cached/refreshed provenance."""
+    snapshot = _get_phase29_snapshot()
+    if isinstance(snapshot, pd.DataFrame) and not snapshot.empty and "LatestPrice" in snapshot.columns:
+        frame = snapshot.copy()
+        source = str(st.session_state.get("phase29_snapshot_source", "saved_artifact"))
+        frame["PublicSourceLabel"] = (
+            "Latest refreshed snapshot" if source == "session" else "Saved research snapshot"
+        )
+        return frame
+    frame = _latest_user_price_snapshot().copy()
+    if not frame.empty:
+        frame["PublicSourceLabel"] = "Cached dataset price"
+    return frame
+
+
+def _public_number(value: object, suffix: str = "", digits: int = 2) -> str:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return "Unavailable" if pd.isna(numeric) else f"{float(numeric):,.{digits}f}{suffix}"
+
+
+def _render_public_market_teaser(prices: pd.DataFrame) -> None:
+    """Render the public landing experience without forecast placeholders."""
+    render_professional_hero(
+        "Multi-Asset Quant Research Platform",
+        "Track gold, silver, crude oil, Bitcoin, S&P 500, and GLD with saved research snapshots, evidence checks, and personalized paper-research plans.",
+        badges=("Multi-asset", "Research-only", "Evidence-aware", "Paper-tracking"),
+    )
+    primary, secondary, spacer = st.columns([1, 1, 2])
+    with primary:
+        st.button(
+            "Continue as Demo User",
+            type="primary",
+            width="stretch",
+            key="public_unlock_top",
+            on_click=_unlock_demo_user,
+        )
+    with secondary:
+        st.button(
+            "View methodology",
+            width="stretch",
+            key="public_methodology_top",
+            on_click=_open_public_methodology,
+        )
+    with spacer:
+        st.caption("Demo access unlocks forecasts, evidence checks, and saved personalized plans.")
+
+    st.markdown("### Public Market Snapshot")
+    st.caption(
+        "Current/cached prices and recent market movement. Forecasts, candidate watchlists, "
+        "evidence checks, and personalized saved plans unlock after demo access."
+    )
+    frame = prices.copy() if isinstance(prices, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        render_empty_state(
+            "Public snapshot unavailable",
+            "No cached price rows are available. Continue in demo mode to review data diagnostics.",
+        )
+    else:
+        for start in range(0, len(frame), 3):
+            columns = st.columns(3)
+            for column, (_, row) in zip(columns, frame.iloc[start:start + 3].iterrows()):
+                with column:
+                    with st.container(border=True):
+                        st.markdown(f"#### {row.get('Asset', 'Asset')}")
+                        st.metric("Latest price", _public_number(row.get("LatestPrice")))
+                        latest_date = str(row.get("LatestPriceDate") or "Date unavailable")
+                        source_label = str(row.get("PublicSourceLabel") or "Cached dataset price")
+                        freshness = str(row.get("DataFreshness") or "Unknown freshness")
+                        st.caption(f"{source_label} · {latest_date} · {freshness}")
+                        change_columns = st.columns(3)
+                        for change_column, label, field in zip(
+                            change_columns,
+                            ("1D", "5D", "30D"),
+                            ("Change1D_pct", "Change5D_pct", "Change30D_pct"),
+                        ):
+                            with change_column:
+                                st.metric(label, _public_number(row.get(field), "%"))
+                        st.caption("Forecast locked · Unlock forecasts and personalized plans in demo mode")
+
+    st.markdown("### Research capabilities")
+    render_feature_grid([
+        {"title": "Candidate Watchlist", "description": "Ranks assets by research quality, evidence, risk, and cost awareness."},
+        {"title": "Evidence of Edge", "description": "Checks whether an idea survives validation metrics and benchmark comparison."},
+        {"title": "Personalized Research Plans", "description": "Turns user goals into watchlist, paper-track, or learn-first plans."},
+        {"title": "Forecast Explorer", "description": "Compares horizon-specific estimates with uncertainty-aware wording."},
+        {"title": "Risk & Cost Awareness", "description": "Highlights risk labels, cost verdicts, and reasons to avoid weak signals."},
+        {"title": "Paper Research Journey", "description": "Tracks research progress without real-money execution."},
+    ])
+    render_how_it_works([
+        "Load or refresh a market snapshot",
+        "Review forecasts and the candidate watchlist",
+        "Check evidence and risk warnings",
+        "Enter research goals",
+        "Save a personalized paper-research plan",
+    ])
+    render_trust_and_safety([
+        {"title": "No broker credentials", "description": "Demo mode never asks for brokerage access details."},
+        {"title": "No real-money execution", "description": "The product records research and paper-tracking plans only."},
+        {"title": "No return promises", "description": "Results remain uncertain and require confirmation."},
+        {"title": "Clear data provenance", "description": "Stale, cached, saved, and refreshed snapshots stay visibly labeled."},
+        {"title": "Evidence before action", "description": "Weak and rejected candidates remain visible."},
+        {"title": "Paper tracking first", "description": "Research plans start with observation and simulation."},
+    ])
+    render_methodology_preview(
+        "Every asset idea is filtered through prediction snapshot, candidate classification, validation evidence, cost awareness, and user goals."
+    )
+    st.button(
+        "Open methodology",
+        key="public_methodology_preview",
+        on_click=_open_public_methodology,
+    )
+    render_final_cta(
+        "Ready to build a personalized research plan?",
+        "Continue in demo mode to refresh research, inspect evidence, and save goal-based paper-research plans.",
+    )
+    st.button(
+        "Continue as Demo User",
+        type="primary",
+        key="public_unlock_final",
+        on_click=_unlock_demo_user,
+    )
+    render_clean_footer()
+
+
+def _render_unlock_prompt() -> None:
+    render_professional_hero(
+        "Unlock personalized research plans",
+        "Use demo mode to save goals, generate personalized paper-research plans, and review candidate/evidence history.",
+        badges=("Demo user", "Research-only", "Paper-tracking"),
+    )
+    st.warning(
+        "Do not enter broker, bank, trading-account credentials, or API secrets. This app is research-only."
+    )
+    st.button(
+        "Continue as Demo User",
+        type="primary",
+        key="gated_page_unlock",
+        on_click=_unlock_demo_user,
+    )
 
 
 def _status_card_style(status: str) -> str:
@@ -1284,6 +1459,10 @@ if "phase29_snapshot_source" not in st.session_state:
     st.session_state.phase29_snapshot_source = "placeholder"
 if "phase29_snapshot_notice" not in st.session_state:
     st.session_state.phase29_snapshot_notice = None
+if "user_unlocked" not in st.session_state:
+    st.session_state.user_unlocked = False
+if "demo_user_id" not in st.session_state:
+    st.session_state.demo_user_id = None
 if "phase29_selected_plan_asset" not in st.session_state:
     st.session_state.phase29_selected_plan_asset = DEFAULT_ASSET
 if "directional_results" not in st.session_state:
@@ -1436,8 +1615,13 @@ if not st.session_state.get("saved_research_state_hydrated", False):
 # Sidebar Navigation
 # ════════════════════════════════════════════════════════════════
 
-st.sidebar.markdown("## Market Research Assistant")
-st.sidebar.caption("Simple plans first. Technical evidence remains available when needed.")
+st.sidebar.markdown("## Quant Research Lab")
+if _is_user_unlocked():
+    st.sidebar.success("Demo user active")
+    st.sidebar.button("Logout", key="sidebar_demo_logout", on_click=_logout_demo_user)
+else:
+    st.sidebar.info("Public preview mode")
+    st.sidebar.button("Unlock demo", key="sidebar_demo_unlock", on_click=_unlock_demo_user)
 st.sidebar.markdown("---")
 
 NAVIGATION_GROUPS = {
@@ -1510,6 +1694,11 @@ NAVIGATION_GROUPS = {
 }
 
 LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
+PUBLIC_PRODUCT_PAGES = [
+    "Market Research Assistant",
+    "Login / Unlock Demo",
+    "About / Methodology",
+]
 PRIMARY_PRODUCT_PAGES = [
     "Market Research Assistant",
     "Candidate Watchlist",
@@ -1522,13 +1711,24 @@ PRIMARY_PRODUCT_PAGES = [
     "Paper Research Journey",
     "About / Methodology",
 ]
+GATED_PRODUCT_PAGES = set(PRIMARY_PRODUCT_PAGES) - {
+    "Market Research Assistant",
+    "About / Methodology",
+}
 
+navigation_pages = (
+    PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"]
+    if _is_user_unlocked()
+    else PUBLIC_PRODUCT_PAGES
+)
+if st.session_state.get("primary_product_navigation") not in navigation_pages:
+    st.session_state.primary_product_navigation = "Market Research Assistant"
 experience_page = st.sidebar.radio(
     "Navigate",
-    PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"],
+    navigation_pages,
     key="primary_product_navigation",
 )
-is_advanced_diagnostic = experience_page == "Advanced Diagnostics"
+is_advanced_diagnostic = _is_user_unlocked() and experience_page == "Advanced Diagnostics"
 if is_advanced_diagnostic:
     navigation_group = st.sidebar.selectbox("Diagnostic area", list(NAVIGATION_GROUPS), key="navigation_group")
     group_pages = NAVIGATION_GROUPS[navigation_group]
@@ -1545,24 +1745,27 @@ PAGE_ROUTE_ALIASES = {
     "Model Edge Benchmark Lab": "Phase 22: Prediction Edge Improvement",
 }
 page = PAGE_ROUTE_ALIASES.get(page_label, page_label)
-default_asset_index = asset_names.index(st.session_state.selected_asset) if st.session_state.selected_asset in asset_names else 0
-selected_asset = st.sidebar.selectbox("Research Asset", asset_names, index=default_asset_index)
-st.session_state.selected_asset = selected_asset
+horizon_options = get_available_horizons()
+if _is_user_unlocked():
+    default_asset_index = asset_names.index(st.session_state.selected_asset) if st.session_state.selected_asset in asset_names else 0
+    selected_asset = st.sidebar.selectbox("Research Asset", asset_names, index=default_asset_index)
+    st.session_state.selected_asset = selected_asset
+    default_horizon_index = horizon_options.index(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else horizon_options.index(DEFAULT_HORIZON)
+    selected_horizon = st.sidebar.selectbox(
+        "Research Horizon",
+        horizon_options,
+        index=default_horizon_index,
+        format_func=lambda value: f"{int(value)}D",
+    )
+    validate_asset_horizon(selected_asset, selected_horizon)
+    st.session_state.selected_horizon = int(selected_horizon)
+    st.sidebar.caption("Specialized scanners may override the central horizon for batch research.")
+else:
+    selected_asset = st.session_state.selected_asset if st.session_state.selected_asset in asset_names else DEFAULT_ASSET
+    selected_horizon = int(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else DEFAULT_HORIZON
 target_col = get_asset_target(selected_asset)
 
-horizon_options = get_available_horizons()
-default_horizon_index = horizon_options.index(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else horizon_options.index(DEFAULT_HORIZON)
-selected_horizon = st.sidebar.selectbox(
-    "Research Horizon",
-    horizon_options,
-    index=default_horizon_index,
-    format_func=lambda value: f"{int(value)}D",
-)
-validate_asset_horizon(selected_asset, selected_horizon)
-st.session_state.selected_horizon = int(selected_horizon)
-st.sidebar.caption("Specialized scanners may override the central horizon for batch research.")
-
-if _asset_mismatch(selected_asset):
+if _is_user_unlocked() and _asset_mismatch(selected_asset):
     st.sidebar.warning(
         f"Current trained models are for {st.session_state.trained_asset}. "
         f"Train again to use {selected_asset}."
@@ -1578,6 +1781,20 @@ if is_advanced_diagnostic:
 # ════════════════════════════════════════════════════════════════
 # PAGE: HOME
 # ════════════════════════════════════════════════════════════════
+
+if page == "Login / Unlock Demo":
+    _render_unlock_prompt()
+    render_clean_footer()
+    st.stop()
+
+if not _is_user_unlocked() and (page in GATED_PRODUCT_PAGES or is_advanced_diagnostic):
+    st.info("Unlock demo mode to access this research page.")
+    _render_unlock_prompt()
+    st.stop()
+
+if page == "Market Research Assistant" and not _is_user_unlocked():
+    _render_public_market_teaser(_public_market_snapshot())
+    st.stop()
 
 if page == "Market Research Assistant":
     render_hero_section(

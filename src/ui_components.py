@@ -231,6 +231,86 @@ def render_hero_section(pill: str, headline: str, subheadline: str) -> None:
     )
 
 
+def render_professional_hero(
+    title: str,
+    subtitle: str,
+    badges: Sequence[str] = (),
+) -> None:
+    """Render a restrained public-product hero without external assets."""
+    badge_html = "".join(
+        f'<span class="premium-pill">{_safe(label)}</span>' for label in badges
+    )
+    st.markdown(
+        '<section class="premium-hero">'
+        f'<div class="premium-pill">Quant Research Lab</div><h1>{_safe(title)}</h1>'
+        f'<p>{_safe(subtitle)}</p><div class="hero-badges">{badge_html}</div>'
+        '</section>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_strip(cards: Sequence[Mapping[str, Any]]) -> None:
+    """Render a compact strip of public metrics with explicit source subtitles."""
+    if not cards:
+        return
+    columns = st.columns(len(cards))
+    for column, card in zip(columns, cards):
+        with column:
+            st.metric(
+                str(card.get("label", "Metric")),
+                str(card.get("value", "Unavailable")),
+                help=str(card.get("help", "")) or None,
+            )
+            subtitle = str(card.get("subtitle", ""))
+            if subtitle:
+                st.caption(subtitle)
+
+
+def render_feature_grid(features: Sequence[Mapping[str, Any]]) -> None:
+    """Render product capabilities as un-nested, scan-friendly cards."""
+    for start in range(0, len(features), 3):
+        columns = st.columns(3)
+        for column, feature in zip(columns, features[start:start + 3]):
+            with column:
+                with st.container(border=True):
+                    st.markdown(f"#### {feature.get('title', 'Research feature')}")
+                    st.write(str(feature.get("description", "")))
+
+
+def render_how_it_works(steps: Sequence[str]) -> None:
+    """Render a simple numbered public research workflow."""
+    st.markdown("### How the research flow works")
+    for index, step in enumerate(steps, start=1):
+        st.markdown(f"**{index}.** {step}")
+
+
+def render_trust_and_safety(items: Sequence[Mapping[str, str]]) -> None:
+    """Render concise trust and safety commitments."""
+    st.markdown("### Built for research discipline, not blind trading")
+    render_feature_grid(items)
+
+
+def render_methodology_preview(text: str) -> None:
+    """Render a short methodology explanation before navigation controls."""
+    with st.container(border=True):
+        st.markdown("### Methodology preview")
+        st.write(text)
+
+
+def render_final_cta(title: str, text: str) -> None:
+    """Render the final public conversion prompt without hidden actions."""
+    st.markdown(f"### {title}")
+    st.write(text)
+
+
+def render_clean_footer() -> None:
+    """Render a restrained research-only footer."""
+    st.markdown("---")
+    st.caption(
+        "Quant Research Lab · Multi-asset research-only workspace · No real-money execution"
+    )
+
+
 def render_status_badge(status: Any) -> None:
     style = _STATUS_STYLES.get(str(status).casefold(), "neutral")
     st.markdown(f'<span class="status-badge {style}">{_safe(_display_label(status))}</span>', unsafe_allow_html=True)
@@ -652,7 +732,9 @@ def render_download_buttons(table_map: Mapping[str, Any]) -> None:
 
 
 __all__ = [
-    "inject_premium_css", "render_premium_header", "render_hero_section", "render_status_badge",
+    "inject_premium_css", "render_premium_header", "render_hero_section", "render_professional_hero",
+    "render_metric_strip", "render_feature_grid", "render_how_it_works", "render_trust_and_safety",
+    "render_methodology_preview", "render_final_cta", "render_clean_footer", "render_status_badge",
     "render_confidence_badge", "render_opportunity_score", "render_metric_card", "render_status_card",
     "render_metric_grid", "render_section_header", "render_glass_container", "render_asset_plan_card",
     "render_opportunity_card", "render_risk_explanation_card", "render_monitoring_card", "render_empty_state",

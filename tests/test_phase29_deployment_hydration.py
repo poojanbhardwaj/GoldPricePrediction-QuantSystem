@@ -112,7 +112,9 @@ def test_clean_session_hydrates_saved_research_and_phase29_fallback_views():
     expected_move = f"{float(first_row['PredictedMovePct']):,.2f}%"
 
     with patch("src.artifact_store.load_latest_artifact", return_value=pd.DataFrame()):
-        app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90).run(timeout=90)
+        app = AppTest.from_file(str(ROOT / "app.py"), default_timeout=90)
+        app.session_state["user_unlocked"] = True
+        app.run(timeout=90)
 
     assert not app.exception
     report = app.session_state["phase29_user_report"]
