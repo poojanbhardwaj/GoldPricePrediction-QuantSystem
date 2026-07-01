@@ -101,7 +101,21 @@ def _validate_password(password: str) -> str:
     value = str(password or "")
     if len(value) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    if not re.search(r"[A-Za-z]", value) or not re.search(r"\d", value):
+        raise ValueError("Password must contain at least one letter and one number")
+    if value.casefold() in {
+        "password1", "password123", "qwerty123", "letmein1", "welcome1", "admin123",
+    }:
+        raise ValueError("Choose a less common password")
     return value
+
+
+def validate_email_format(email: str) -> str:
+    return _normalize_email(email)
+
+
+def validate_password_strength(password: str) -> str:
+    return _validate_password(password)
 
 
 def _hash_password(password: str, *, salt_hex: str | None = None, iterations: int = PASSWORD_HASH_ITERATIONS) -> tuple[str, str, int]:
@@ -188,6 +202,17 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
 
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                default_assets_json TEXT NOT NULL,
+                default_horizon TEXT NOT NULL,
+                explanation_mode TEXT NOT NULL,
+                default_page TEXT NOT NULL,
+                risk_display_mode TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+
             CREATE TABLE IF NOT EXISTS user_asset_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 plan_run_id INTEGER NOT NULL,
@@ -221,6 +246,7 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
             """
         )
         for column, definition in (
+            ("updated_at", "TEXT"),
             ("auth_provider", "TEXT NOT NULL DEFAULT 'legacy'"),
             ("auth_user_id", "TEXT"),
             ("display_name", "TEXT"),
@@ -234,6 +260,8 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
             _ensure_column(connection, "users", column, definition)
         for column in ("candidate_category", "risk_label", "cost_verdict"):
             _ensure_column(connection, "user_asset_plans", column, "TEXT")
+        _ensure_column(connection, "user_profiles", "profile_json", "TEXT")
+        _ensure_column(connection, "user_plan_runs", "asset_count", "INTEGER NOT NULL DEFAULT 0")
         connection.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity
@@ -241,6 +269,10 @@ def init_user_platform_db(db_path: str | Path = "data/app.db") -> None:
             """
         )
         timestamp = _now()
+        connection.execute(
+            "UPDATE users SET updated_at = COALESCE(updated_at, created_at, ?)",
+            (timestamp,),
+        )
         connection.execute(
             """
             UPDATE users
@@ -539,6 +571,7 @@ def save_user_profile(
         normalized["style"],
         normalized["existing_position"],
         int(normalized["wants_simple_language"]),
+        json.dumps(_json_safe(normalized)),
         timestamp,
         timestamp,
     )
@@ -548,8 +581,8 @@ def save_user_profile(
             INSERT INTO user_profiles (
                 user_id, name, experience_level, risk_tolerance, goal_type,
                 preferred_assets_json, default_horizon, simulated_capital, style,
-                existing_position, wants_simple_language, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                existing_position, wants_simple_language, profile_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 name = excluded.name,
                 experience_level = excluded.experience_level,
@@ -561,6 +594,7 @@ def save_user_profile(
                 style = excluded.style,
                 existing_position = excluded.existing_position,
                 wants_simple_language = excluded.wants_simple_language,
+                profile_json = excluded.profile_json,
                 updated_at = excluded.updated_at
             """,
             values,
@@ -837,12 +871,13 @@ def save_user_plan_run(
     saved_at = _now()
     with _connect(db_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO user_plan_runs (user_id, profile_json, source, saved_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO user_plan_runs (user_id, profile_json, source, saved_at, asset_count) VALUES (?, ?, ?, ?, ?)",
             (
                 int(user_id),
                 json.dumps(_json_safe(normalized_profile)),
                 str(source or "phase32a"),
                 saved_at,
+                int(len(plans)),
             ),
         )
         run_id = int(cursor.lastrowid)
@@ -949,6 +984,108 @@ def list_user_plan_runs(
         )
 
 
+def save_user_preferences(
+    user_id: int | None,
+    preferences: Mapping[str, Any],
+    db_path: str | Path = "data/app.db",
+) -> int:
+    """Save account preferences for exactly one application user."""
+    if user_id is None:
+        raise ValueError("An unlocked application user is required to save preferences")
+    init_user_platform_db(db_path)
+    supplied_assets = preferences.get("default_assets", get_asset_names())
+    assets = _preferred_assets(supplied_assets)
+    horizon = str(preferences.get("default_horizon") or "Auto")
+    explanation_mode = str(preferences.get("explanation_mode") or "Simple")
+    default_page = str(preferences.get("default_page") or "Market Research Assistant")
+    risk_display_mode = str(preferences.get("risk_display_mode") or "Summary")
+    timestamp = _now()
+    with _connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO user_preferences (
+                user_id, default_assets_json, default_horizon, explanation_mode,
+                default_page, risk_display_mode, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                default_assets_json = excluded.default_assets_json,
+                default_horizon = excluded.default_horizon,
+                explanation_mode = excluded.explanation_mode,
+                default_page = excluded.default_page,
+                risk_display_mode = excluded.risk_display_mode,
+                updated_at = excluded.updated_at
+            """,
+            (
+                int(user_id), json.dumps(assets), horizon, explanation_mode,
+                default_page, risk_display_mode, timestamp,
+            ),
+        )
+    return int(user_id)
+
+
+def load_user_preferences(
+    user_id: int | None, db_path: str | Path = "data/app.db"
+) -> dict[str, Any] | None:
+    """Load preferences owned by one user without falling back to another user."""
+    if user_id is None:
+        return None
+    init_user_platform_db(db_path)
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT default_assets_json, default_horizon, explanation_mode,
+                   default_page, risk_display_mode, updated_at
+            FROM user_preferences WHERE user_id = ?
+            """,
+            (int(user_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    try:
+        result["default_assets"] = json.loads(result.pop("default_assets_json"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result["default_assets"] = get_asset_names()
+        result.pop("default_assets_json", None)
+    return result
+
+
+def update_user_last_active(
+    user_id: int | None, db_path: str | Path = "data/app.db"
+) -> str | None:
+    """Update last activity for one authenticated application user."""
+    if user_id is None:
+        return None
+    init_user_platform_db(db_path)
+    timestamp = _now()
+    with _connect(db_path) as connection:
+        connection.execute(
+            "UPDATE users SET last_active_at = ?, updated_at = ? WHERE id = ?",
+            (timestamp, timestamp, int(user_id)),
+        )
+    return timestamp
+
+
+def update_user_display_name(
+    user_id: int | None,
+    display_name: str,
+    db_path: str | Path = "data/app.db",
+) -> None:
+    """Update non-sensitive account presentation fields for one user."""
+    if user_id is None:
+        raise ValueError("An unlocked application user is required to update an account")
+    name = " ".join(str(display_name or "").strip().split())[:80]
+    if not name:
+        raise ValueError("Display name is required")
+    init_user_platform_db(db_path)
+    timestamp = _now()
+    with _connect(db_path) as connection:
+        connection.execute(
+            "UPDATE users SET name = ?, display_name = ?, updated_at = ? WHERE id = ?",
+            (name, name, timestamp, int(user_id)),
+        )
+
+
 __all__ = [
     "PLAN_TYPES",
     "PERSONALIZED_PLAN_COLUMNS",
@@ -957,6 +1094,8 @@ __all__ = [
     "get_or_create_demo_user",
     "create_password_user",
     "authenticate_password_user",
+    "validate_email_format",
+    "validate_password_strength",
     "apply_profile_defaults",
     "save_user_profile",
     "load_user_profile",
@@ -965,4 +1104,8 @@ __all__ = [
     "save_user_plan_run",
     "load_latest_user_plan",
     "list_user_plan_runs",
+    "save_user_preferences",
+    "load_user_preferences",
+    "update_user_last_active",
+    "update_user_display_name",
 ]

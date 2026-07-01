@@ -89,17 +89,30 @@ from src.user_platform import (
     list_user_plan_runs,
     load_latest_user_plan,
     load_user_profile,
+    load_user_preferences,
     personalize_asset_plans,
     save_user_plan_run,
     save_user_profile,
+    save_user_preferences,
+    update_user_display_name,
 )
 from src.auth_manager import (
-    create_account_and_login,
     get_current_auth_user,
+    is_supabase_configured,
     is_user_unlocked,
-    login_with_password,
     logout_current_user,
+    sign_in_with_email,
+    sign_up_with_email,
     unlock_demo_user,
+)
+from src.research_history import (
+    compare_research_history_runs,
+    load_latest_research_history_run,
+    load_previous_research_history_run,
+    load_research_history_runs,
+    normalize_research_snapshot_for_history,
+    save_research_history_run,
+    summarize_research_changes,
 )
 from src.baselines import price_baseline_leaderboard, model_vs_naive_summary
 from src.directional_models import (
@@ -590,7 +603,7 @@ def _phase29_placeholder_snapshot(prices: pd.DataFrame) -> pd.DataFrame:
     frame = prices.copy()
     defaults = {
         "BestHorizon": 0, "PredictedPrice": np.nan, "PredictedMovePct": np.nan,
-        "Status": "Not Enough Evidence", "OpportunityScore": 0.0, "OpportunityGrade": "F",
+        "Status": "Not Enough Evidence", "OpportunityScore": np.nan, "OpportunityGrade": "F",
         "RiskLabel": "Not Enough Evidence", "CostVerdict": "MissingEstimate",
         "PassiveBenchmarkName": "Passive benchmark pending", "SimplePlan": "Refresh / rebuild research to create a complete paper-research plan.",
     }
@@ -771,6 +784,13 @@ def _render_unlock_prompt() -> None:
     st.warning(
         "Do not enter broker, bank, trading-account credentials, or API secrets. This app is research-only."
     )
+    if is_supabase_configured():
+        st.success("Verified email authentication is enabled. New accounts must verify email ownership before workspace access.")
+    else:
+        st.warning(
+            "Local development auth mode. Email ownership is not verified. "
+            "Configure Supabase secrets for verified-email deployment."
+        )
 
     st.markdown("### Sign in or Create account")
     st.caption("Use your app account only. Never enter broker, bank, trading-account credentials, or API secrets.")
@@ -783,7 +803,7 @@ def _render_unlock_prompt() -> None:
             submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
         if submitted:
             try:
-                login_with_password(email, password)
+                sign_in_with_email(email, password)
                 st.success("Signed in. Opening your research workspace.")
                 st.rerun()
             except Exception as exc:
@@ -807,9 +827,13 @@ def _render_unlock_prompt() -> None:
                 st.error("Please acknowledge the research-only safety notice before creating an account.")
             else:
                 try:
-                    create_account_and_login(email, password, display_name or None)
-                    st.success("Account created. Opening your research workspace.")
-                    st.rerun()
+                    created_user = sign_up_with_email(email, password, display_name or None)
+                    notice = str(st.session_state.get("auth_notice", ""))
+                    if created_user.is_authenticated:
+                        st.success("Account created. Opening your research workspace.")
+                        st.rerun()
+                    else:
+                        st.info(notice or "Verification email sent. Please verify your email before accessing the research workspace.")
                 except Exception as exc:
                     st.error(str(exc))
 
@@ -819,7 +843,7 @@ def _render_unlock_prompt() -> None:
             "Your saved profile, personalized research plans, watchlist reviews, and future research history stay tied to your app user account."
         )
         st.caption(
-            "Passwords are stored as salted hashes. Broker, bank, trading-account credentials, and API secrets are never collected."
+            "Local fallback passwords are stored as salted hashes. Broker, bank, trading-account credentials, and API secrets are never collected."
         )
 
 def _status_card_style(status: str) -> str:
@@ -1155,6 +1179,132 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
     })
 
 
+def _render_research_history_page() -> None:
+    current_user = get_current_auth_user()
+    if not current_user.is_authenticated or current_user.app_user_id is None:
+        st.info("Log in to access user-owned research history.")
+        return
+    user_id = int(current_user.app_user_id)
+    runs = load_research_history_runs(user_id)
+    latest = load_latest_research_history_run(user_id)
+    previous = load_previous_research_history_run(user_id)
+
+    st.info(
+        "This compares saved research snapshots. It is research tracking, not trading instruction."
+    )
+    if runs.empty:
+        render_empty_state(
+            "No saved research history yet",
+            "Generate a personalized plan to save the first evidence snapshot. Placeholder-only evidence is not stored.",
+        )
+        return
+
+    changes = compare_research_history_runs(previous, latest) if not previous.empty else pd.DataFrame()
+    summary = summarize_research_changes(changes)
+    render_metric_grid([
+        {"title": "Upgrades", "value": summary["Upgrades"], "subtitle": "Saved evidence improved", "status": "positive"},
+        {"title": "Downgrades", "value": summary["Downgrades"], "subtitle": "Saved evidence weakened", "status": "warning"},
+        {"title": "Major changes", "value": summary["MajorChanges"], "subtitle": "Needs review", "status": "info"},
+        {"title": "Stable assets", "value": summary["StableAssets"], "subtitle": "No major change", "status": "neutral"},
+    ])
+    render_safe_table(runs, "Saved research runs", "No user-owned history runs are available.")
+    if changes.empty:
+        st.info("One snapshot is saved. A change comparison will appear after the next personalized plan run.")
+    else:
+        render_safe_table(
+            changes,
+            "Latest vs previous snapshot",
+            "No comparable asset changes were found.",
+        )
+    render_safe_table(latest, "Latest saved evidence", "The latest run contains no asset rows.")
+    render_download_buttons({
+        "Research run index": (runs, "research_history_runs.csv"),
+        "Research changes": (changes, "research_history_changes.csv"),
+        "Latest research snapshot": (latest, "latest_research_history.csv"),
+    })
+
+
+def _render_account_settings_page() -> None:
+    current_user = get_current_auth_user()
+    if not current_user.is_authenticated or current_user.app_user_id is None:
+        st.info("Log in to manage user-owned research settings.")
+        return
+    user_id = int(current_user.app_user_id)
+    profile = load_user_profile(user_id) or {}
+    preferences = load_user_preferences(user_id) or {}
+    plan_runs = list_user_plan_runs(user_id)
+    history_runs = load_research_history_runs(user_id)
+    account_mode = "Supabase verified" if current_user.is_email_verified else "Local development"
+
+    render_metric_grid([
+        {"title": "Account mode", "value": account_mode, "subtitle": "Email ownership verified" if current_user.is_email_verified else "Email ownership is not verified", "status": "positive" if current_user.is_email_verified else "warning"},
+        {"title": "Saved plans", "value": len(plan_runs), "subtitle": "User-owned plan runs", "status": "info"},
+        {"title": "History runs", "value": len(history_runs), "subtitle": "Saved evidence snapshots", "status": "info"},
+    ])
+    with st.container(border=True):
+        st.markdown("### Account")
+        st.write(f"**Email:** {current_user.email or 'Not provided'}")
+        st.write(f"**Display name:** {current_user.display_name}")
+        st.write(f"**Auth provider:** {current_user.auth_provider}")
+        st.write(f"**Email verification:** {'Verified' if current_user.is_email_verified else 'Not verified (local development)'}")
+        st.write(f"**Created:** {current_user.created_at or 'Timestamp unavailable'}")
+        st.write(f"**Last active:** {current_user.last_active_at or 'Current session'}")
+        if profile:
+            st.caption(
+                f"Saved profile: {profile.get('experience_level', 'Unspecified')} experience, "
+                f"{profile.get('risk_tolerance', 'Unspecified')} risk comfort, "
+                f"{profile.get('goal_type', 'Unspecified')} goal."
+            )
+
+    supported_assets = get_supported_assets()
+    saved_assets = [asset for asset in preferences.get("default_assets", supported_assets) if asset in supported_assets]
+    saved_horizon = str(preferences.get("default_horizon", "Auto"))
+    horizon_choices = ["Auto", "1D", "5D", "10D", "20D", "30D"]
+    default_pages = [
+        "Market Research Assistant", "Candidate Watchlist", "Evidence of Edge",
+        "User Goals & Saved Plans", "Research History & Changes", "Asset Plans",
+    ]
+    with st.form("account_research_preferences"):
+        display_name = st.text_input("Display name", value=current_user.display_name)
+        default_assets = st.multiselect("Preferred default assets", supported_assets, default=saved_assets or supported_assets)
+        default_horizon = st.selectbox(
+            "Default horizon", horizon_choices,
+            index=horizon_choices.index(saved_horizon) if saved_horizon in horizon_choices else 0,
+        )
+        explanation_mode = st.selectbox(
+            "Explanation mode", ["Simple", "Detailed"],
+            index=1 if preferences.get("explanation_mode") == "Detailed" else 0,
+        )
+        saved_page = str(preferences.get("default_page", "Market Research Assistant"))
+        default_page = st.selectbox(
+            "Default page after login", default_pages,
+            index=default_pages.index(saved_page) if saved_page in default_pages else 0,
+        )
+        risk_modes = ["Summary", "Detailed", "Warnings first"]
+        saved_risk_mode = str(preferences.get("risk_display_mode", "Summary"))
+        risk_display_mode = st.selectbox(
+            "Risk display mode", risk_modes,
+            index=risk_modes.index(saved_risk_mode) if saved_risk_mode in risk_modes else 0,
+        )
+        save_settings = st.form_submit_button("Save account settings", type="primary")
+    if save_settings:
+        update_user_display_name(user_id, display_name)
+        save_user_preferences(user_id, {
+            "default_assets": default_assets,
+            "default_horizon": default_horizon,
+            "explanation_mode": explanation_mode,
+            "default_page": default_page,
+            "risk_display_mode": risk_display_mode,
+        })
+        st.session_state.current_user_label = display_name.strip()
+        st.success("Account research settings saved for this user.")
+
+    st.warning(
+        "Safety boundary: this account stores research preferences only. It does not accept broker, bank, "
+        "trading-account credentials, execution keys, or real-money settings."
+    )
+
+
 def _render_user_goals_saved_plans() -> None:
     current_user = get_current_auth_user()
     if not current_user.is_authenticated or current_user.app_user_id is None:
@@ -1312,8 +1462,29 @@ def _render_user_goals_saved_plans() -> None:
         )
         generated_plans = personalize_asset_plans(profile_input, watchlist, edge_table)
         save_user_plan_run(user_id, profile_input, generated_plans)
+        history_save_failed = False
+        try:
+            history_snapshot = normalize_research_snapshot_for_history(
+                prediction_snapshot,
+                watchlist=watchlist,
+                edge_table=edge_table,
+                personalized_plans=generated_plans,
+            )
+            history_run_id = save_research_history_run(
+                user_id,
+                history_snapshot,
+                run_label="Personalized research plan",
+                source=str(st.session_state.get("phase29_snapshot_source", "app")),
+            )
+        except Exception as exc:
+            history_run_id = 0
+            history_save_failed = True
+            st.warning(f"Plan saved, but research history could not be updated: {_safe_phase29_warning(exc)}")
         st.session_state.phase32a_personalized_plans = generated_plans
-        st.success("Personalized paper-research plan saved.")
+        if history_run_id:
+            st.success("Personalized paper-research plan and research history snapshot saved.")
+        elif not history_save_failed:
+            st.warning("The plan was saved, but placeholder-only evidence was not added to research history.")
 
     active_plans = generated_plans
     if active_plans.empty:
@@ -1753,11 +1924,13 @@ PRIMARY_PRODUCT_PAGES = [
     "Candidate Watchlist",
     "Evidence of Edge",
     "User Goals & Saved Plans",
+    "Research History & Changes",
     "Asset Plans",
     "Forecast Explorer",
     "Cost-Aware Plan",
     "Portfolio Summary",
     "Paper Research Journey",
+    "Account & Settings",
     "About / Methodology",
 ]
 GATED_PRODUCT_PAGES = set(PRIMARY_PRODUCT_PAGES) - {
@@ -1825,10 +1998,16 @@ st.sidebar.caption("Research assistant | Login required for workspace")
 
 
 current_auth_user = get_current_auth_user()
+if current_auth_user.is_authenticated and current_auth_user.is_email_verified:
+    account_mode_label = "Verified email"
+elif current_auth_user.is_authenticated and current_auth_user.is_local_dev:
+    account_mode_label = "Local development"
+else:
+    account_mode_label = "Public preview"
 render_product_topbar(
     app_name="Quant Research Lab",
-    mode_label="App account active" if current_auth_user.is_authenticated else "Public preview",
-    user_label=current_auth_user.display_name if current_auth_user.is_authenticated else "Public preview",
+    mode_label=account_mode_label,
+    user_label=(current_auth_user.email or current_auth_user.display_name) if current_auth_user.is_authenticated else "Public preview",
     is_unlocked=current_auth_user.is_authenticated,
     on_unlock=_open_login_page,
     on_logout=_logout_demo_user,
@@ -1957,6 +2136,19 @@ if page == "Market Research Assistant":
         int(pd.to_numeric(phase29_snapshot.get("PredictedMovePct"), errors="coerce").notna().sum())
         if "PredictedMovePct" in phase29_snapshot.columns else 0
     )
+    snapshot_date_column = next(
+        (column for column in ("SourceSnapshotDate", "SnapshotDate", "LatestDate", "AsOfDate", "Date") if column in phase29_snapshot.columns),
+        None,
+    )
+    snapshot_dates = (
+        pd.to_datetime(phase29_snapshot[snapshot_date_column], errors="coerce")
+        if snapshot_date_column else pd.Series(dtype="datetime64[ns]")
+    )
+    latest_snapshot_date = snapshot_dates.max()
+    freshness_text = phase29_snapshot.get(
+        "DataFreshness", pd.Series("Unknown", index=phase29_snapshot.index)
+    ).astype(str)
+    stale_flag = bool(freshness_text.str.contains("stale", case=False, na=False).any())
     with st.expander("Research snapshot diagnostics", expanded=False):
         st.dataframe(pd.DataFrame([{
             "SourceUsed": st.session_state.get("phase29_snapshot_source", "placeholder"),
@@ -1965,6 +2157,8 @@ if page == "Market Research Assistant":
             "RowCount": int(len(phase29_snapshot)),
             "NumericPredictedPrices": numeric_prices,
             "NumericPredictedMoves": numeric_moves,
+            "LatestDate": "Unavailable" if pd.isna(latest_snapshot_date) else latest_snapshot_date.date().isoformat(),
+            "StaleFlag": stale_flag,
         }]), width="stretch", hide_index=True)
         if latest_warnings:
             st.markdown("**Latest research warnings**")
@@ -2142,6 +2336,16 @@ elif page == "User Goals & Saved Plans":
     )
     render_disclaimer_banner()
     _render_user_goals_saved_plans()
+
+
+elif page == "Research History & Changes":
+    render_premium_header(
+        "Research History & Changes",
+        "Compare user-owned saved evidence over time without re-scoring past results.",
+        "Saved research history",
+    )
+    render_disclaimer_banner()
+    _render_research_history_page()
 
 
 elif page == "Paper Research Journey":
@@ -2577,7 +2781,7 @@ elif page == "Forecast Explorer":
     with how_a:
         render_navigation_card(
             "Forecast line and range",
-            "The line represents the saved research estimate. Any range represents uncertainty, not a guaranteed path.",
+            "The line represents the saved research estimate. Any range represents uncertainty, not an assured path.",
             "Compare the selected horizon with current history",
         )
     with how_b:
@@ -2838,6 +3042,16 @@ elif page == "Portfolio Summary":
                     st.info(f"No plans currently fall into {status_group.lower()}.")
                 else:
                     st.dataframe(group[["Asset", "Horizon", "Status", "Confidence", "Summary", "MainRisk", "RecheckWhen"]], width="stretch", hide_index=True)
+
+
+elif page == "Account & Settings":
+    render_premium_header(
+        "Account & Settings",
+        "Manage identity display and user-owned research preferences.",
+        "Research account",
+    )
+    render_disclaimer_banner()
+    _render_account_settings_page()
 
 
 elif page == "About / Methodology":
@@ -3423,7 +3637,7 @@ elif page == "🔮 Prediction":
 
             st.caption(
                 f"Range is based on held-out test RMSE = ${prediction_range.error_used:,.2f}. "
-                "It is an uncertainty estimate, not a guaranteed interval."
+                "It is an uncertainty estimate, not an assured interval."
             )
 
             st.markdown("### Trading Signal")

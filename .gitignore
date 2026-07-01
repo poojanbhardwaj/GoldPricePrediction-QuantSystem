@@ -15,6 +15,7 @@ ENV/
 # Secrets
 .env
 *.env
+.env.*
 .streamlit/secrets.toml
 
 # Data / generated datasets
@@ -64,12 +65,15 @@ app_before_*.py
 _quant_upgrade_temp/
 _real_patch_temp/
 _phase*/
+phase*_files/
 _nextday_target_fix/
 *_patch_work/
 *_temp/
 
 # Zip files
 *.zip
+*_debug.zip
+*_wip*.txt
 
 # Logs
 *.log

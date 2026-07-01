@@ -267,6 +267,8 @@ def render_product_topbar(
             label_column, button_column = st.columns([1, 1])
             with label_column:
                 st.caption(user_label or mode_label)
+                if user_label and mode_label and user_label != mode_label:
+                    st.caption(mode_label)
             with button_column:
                 if is_unlocked:
                     st.button(
@@ -524,7 +526,7 @@ def render_navigation_card(title: str, description: str, destination: str = "") 
     )
 
 
-def _fmt_number(value: Any, *, digits: int = 2, suffix: str = "", missing: str = "Not available") -> str:
+def _fmt_number(value: Any, *, digits: int = 2, suffix: str = "", missing: str = "Unavailable") -> str:
     number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     if pd.isna(number):
         return missing
@@ -536,9 +538,9 @@ def render_asset_price_card(row: Mapping[str, Any]) -> None:
     status = str(data.get("Status", "Not Enough Evidence"))
     style = _STATUS_STYLES.get(status.casefold(), "neutral")
     price = _fmt_number(data.get("LatestPrice"), digits=2)
-    score = _fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100")
+    score = _fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100", missing="Score unavailable")
     predicted = _fmt_number(data.get("PredictedPrice"), digits=2, missing="Estimate unavailable")
-    move = _fmt_number(data.get("PredictedMovePct"), suffix="%", missing="No saved estimate")
+    move = _fmt_number(data.get("PredictedMovePct"), suffix="%", missing="Estimate unavailable")
     research_source = data.get("ResearchSourceLabel", "Research source unavailable")
     price_source = data.get("PriceSourceLabel", "Price source unavailable")
     st.markdown(
@@ -566,8 +568,8 @@ def render_prediction_snapshot_card(row: Mapping[str, Any]) -> None:
     st.markdown(
         f'<div class="prediction-card"><h3>{_safe(data.get("Asset", "Asset"))} · {_safe(data.get("BestHorizon", ""))}D estimate</h3>'
         f'<div class="number-strip"><div><span>Current</span><strong>{_fmt_number(data.get("LatestPrice"), missing="Price unavailable")}</strong></div>'
-        f'<div><span>Predicted</span><strong>{_fmt_number(data.get("PredictedPrice"), missing="No saved estimate")}</strong></div>'
-        f'<div><span>Move</span><strong>{_fmt_number(data.get("PredictedMovePct"), suffix="%", missing="No saved estimate for this horizon yet")}</strong></div></div>'
+        f'<div><span>Predicted</span><strong>{_fmt_number(data.get("PredictedPrice"), missing="Estimate unavailable")}</strong></div>'
+        f'<div><span>Move</span><strong>{_fmt_number(data.get("PredictedMovePct"), suffix="%", missing="Estimate unavailable")}</strong></div></div>'
         f'<p>{_safe(research_source)} · {_safe(price_source)} · as of {_safe(data.get("LatestPriceDate", "date unavailable"))}.</p>'
         f'<p>Uncertainty: {_safe(data.get("PredictionUncertaintyLabel", "Unavailable"))}. Forecast evidence is one input and remains insufficient on its own.</p></div>',
         unsafe_allow_html=True,
@@ -590,7 +592,7 @@ def render_cost_summary_card(row: Mapping[str, Any]) -> None:
 def render_score_explainer_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
     st.markdown(
-        f'<div class="score-explainer-card"><h3>Why the opportunity score is {_fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100")}</h3>'
+        f'<div class="score-explainer-card"><h3>Opportunity score: {_fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100", missing="Score unavailable")}</h3>'
         f'<p>{_safe(data.get("ScoreMeaning", "The score ranks research closeness, not expected profit."))}</p>'
         f'<p><strong>Helped by:</strong> {_safe(data.get("ScorePositiveDrivers", "No strong positive driver is confirmed."))}</p>'
         f'<p><strong>Reduced by:</strong> {_safe(data.get("ScoreReducedBy", "Weak evidence"))}</p>'
