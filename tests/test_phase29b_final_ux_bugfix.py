@@ -163,6 +163,16 @@ def test_phase29_prediction_validator_requires_schema_and_real_values():
     assert has_real_predictions(pd.DataFrame({
         "Asset": ["Silver"], "PredictedPrice": [None], "PredictedMovePct": ["2.7847"],
     })) is True
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Gold"], "PredictedPrice": ["Run research"],
+        "PredictedMovePct": ["No saved estimate"],
+    })) is False
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Bitcoin"], "PredictedPrice": ["Unlock forecast"],
+    })) is False
+    assert has_real_predictions(pd.DataFrame({
+        "Asset": ["Silver"], "PredictedMovePct": [1.25],
+    })) is True
 
 
 def test_phase29_snapshot_reads_are_centralized_and_rerun_once_after_success():

@@ -2,6 +2,7 @@
 
 import sys
 import time
+import re
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -331,25 +332,129 @@ def _load_phase29_table(filename: str) -> pd.DataFrame:
 
 def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
     """Return whether a Phase 29 snapshot contains at least one saved prediction."""
-    required = {"Asset", "PredictedPrice", "PredictedMovePct"}
-    if not isinstance(frame, pd.DataFrame) or frame.empty or not required.issubset(frame.columns):
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Asset" not in frame.columns:
         return False
-    predicted_price = pd.to_numeric(frame["PredictedPrice"], errors="coerce")
-    predicted_move = pd.to_numeric(frame["PredictedMovePct"], errors="coerce")
-    return bool(predicted_price.notna().any() or predicted_move.notna().any())
+    prediction_columns = [
+        column for column in ("PredictedPrice", "PredictedMovePct") if column in frame.columns
+    ]
+    if not prediction_columns:
+        return False
+    placeholder_values = {
+        "run research", "run full research", "no saved estimate", "unlock forecast",
+        "estimate unavailable", "not available", "none", "nan", "",
+    }
+    for column in prediction_columns:
+        values = frame[column]
+        placeholders = values.astype("string").str.strip().str.casefold().isin(placeholder_values)
+        numeric = pd.to_numeric(values.mask(placeholders), errors="coerce")
+        if numeric.notna().any():
+            return True
+    return False
+
+
+def _safe_phase29_warning(value: object) -> str:
+    """Redact common credential forms before a run warning reaches diagnostics."""
+    text = str(value or "")
+    text = re.sub(
+        r"(?i)(api[_ -]?key|token|password|secret)\s*[=:]\s*\S+",
+        r"\1=[redacted]",
+        text,
+    )
+    text = re.sub(r"([a-z]+://)[^/\s:@]+:[^@\s/]+@", r"\1[redacted]@", text)
+    return text[:1000]
 
 
 def _get_phase29_snapshot() -> pd.DataFrame:
-    """Load the freshest valid Phase 29 snapshot from memory, then saved artifacts."""
+    """Load the freshest valid Phase 29 snapshot without manufacturing placeholders."""
     report = st.session_state.get("phase29_user_report")
     if isinstance(report, dict):
         session_snapshot = report.get("AllAssetPredictionSnapshot")
         if _has_real_phase29_predictions(session_snapshot):
-            return session_snapshot.copy()
+            snapshot = session_snapshot.copy()
+            source_hint = str(report.get("SnapshotSource", "session"))
+            if source_hint == "Checked-in saved research demo":
+                source_hint = "saved_artifact"
+            elif source_hint not in {"last_good", "saved_artifact"}:
+                source_hint = "session"
+            st.session_state.phase29_last_good_snapshot = snapshot.copy()
+            st.session_state.phase29_snapshot_source = source_hint
+            return snapshot
+
+    last_good_snapshot = st.session_state.get("phase29_last_good_snapshot")
+    if _has_real_phase29_predictions(last_good_snapshot):
+        st.session_state.phase29_snapshot_source = "last_good"
+        return last_good_snapshot.copy()
+
     saved_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
     if _has_real_phase29_predictions(saved_snapshot):
-        return saved_snapshot.copy()
+        snapshot = saved_snapshot.copy()
+        st.session_state.phase29_last_good_snapshot = snapshot.copy()
+        st.session_state.phase29_snapshot_source = "saved_artifact"
+        return snapshot
+    st.session_state.phase29_snapshot_source = "placeholder"
     return pd.DataFrame()
+
+
+def _store_phase29_run_report(phase29_report: object) -> dict:
+    """Store a completed run without allowing incomplete output to erase good evidence."""
+    report = dict(phase29_report) if isinstance(phase29_report, dict) else {}
+    run_snapshot = report.get("AllAssetPredictionSnapshot")
+    warnings = report.get("Warnings", [])
+    if isinstance(warnings, str):
+        warnings = [warnings]
+    elif not isinstance(warnings, list):
+        warnings = list(warnings) if warnings is not None else []
+
+    if _has_real_phase29_predictions(run_snapshot):
+        snapshot = run_snapshot.copy()
+        report["AllAssetPredictionSnapshot"] = snapshot
+        if not _has_real_phase29_predictions(report.get("FinalUserPlans")):
+            report["FinalUserPlans"] = snapshot.copy()
+        if not _has_real_phase29_predictions(report.get("CostAwareAssetPlans")):
+            report["CostAwareAssetPlans"] = snapshot.copy()
+        if not _has_real_phase29_predictions(report.get("CostAwarePlans")):
+            report["CostAwarePlans"] = report["CostAwareAssetPlans"].copy()
+        report["SnapshotSource"] = "session"
+        st.session_state.phase29_last_good_snapshot = snapshot.copy()
+        st.session_state.phase29_snapshot_source = "session"
+        st.session_state.phase29_snapshot_notice = None
+    else:
+        fallback = st.session_state.get("phase29_last_good_snapshot")
+        fallback_source = "last_good"
+        if not _has_real_phase29_predictions(fallback):
+            fallback = _get_phase29_snapshot()
+            fallback_source = str(st.session_state.get("phase29_snapshot_source", "saved_artifact"))
+
+        if _has_real_phase29_predictions(fallback):
+            snapshot = fallback.copy()
+            message = (
+                "Latest research run did not produce a complete prediction snapshot, so the app "
+                "is showing the latest saved research snapshot."
+            )
+            report["AllAssetPredictionSnapshot"] = snapshot
+            if not _has_real_phase29_predictions(report.get("FinalUserPlans")):
+                report["FinalUserPlans"] = snapshot.copy()
+            if not _has_real_phase29_predictions(report.get("CostAwareAssetPlans")):
+                report["CostAwareAssetPlans"] = snapshot.copy()
+            if not _has_real_phase29_predictions(report.get("CostAwarePlans")):
+                report["CostAwarePlans"] = snapshot.copy()
+            report["SnapshotSource"] = (
+                fallback_source if fallback_source in {"last_good", "saved_artifact"} else "last_good"
+            )
+        else:
+            message = (
+                "No valid prediction snapshot is available yet. Check forecast artifacts and research warnings."
+            )
+            report["AllAssetPredictionSnapshot"] = pd.DataFrame()
+            report["SnapshotSource"] = "placeholder"
+            st.session_state.phase29_snapshot_source = "placeholder"
+        if message not in warnings:
+            warnings.append(message)
+        st.session_state.phase29_snapshot_notice = message
+
+    report["Warnings"] = warnings
+    st.session_state.phase29_user_report = report
+    return report
 
 
 def _phase29_snapshot_as_asset_plans(snapshot: pd.DataFrame) -> pd.DataFrame:
@@ -1148,6 +1253,12 @@ if "phase26_portfolio_plan" not in st.session_state:
     st.session_state.phase26_portfolio_plan = None
 if "phase29_user_report" not in st.session_state:
     st.session_state.phase29_user_report = None
+if "phase29_last_good_snapshot" not in st.session_state:
+    st.session_state.phase29_last_good_snapshot = None
+if "phase29_snapshot_source" not in st.session_state:
+    st.session_state.phase29_snapshot_source = "placeholder"
+if "phase29_snapshot_notice" not in st.session_state:
+    st.session_state.phase29_snapshot_notice = None
 if "phase29_selected_plan_asset" not in st.session_state:
     st.session_state.phase29_selected_plan_asset = DEFAULT_ASSET
 if "directional_results" not in st.session_state:
@@ -1491,12 +1602,11 @@ if page == "Market Research Assistant":
             ):
                 st.write(step)
             try:
-                phase29_report = run_full_user_research(
+                phase29_report = _store_phase29_run_report(run_full_user_research(
                     selected_assets=get_supported_assets(), selected_horizons=get_available_horizons(),
                     amount=10000, cost_assumptions=default_cost_assumptions(),
                     refresh=bool(refresh_market_clicked),
-                )
-                st.session_state.phase29_user_report = phase29_report
+                ))
                 st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
                 st.session_state.phase26_asset_plans = phase29_report.get("AssetPlans")
                 _latest_user_price_snapshot.clear()
@@ -1512,8 +1622,41 @@ if page == "Market Research Assistant":
 
     phase29_snapshot = _get_phase29_snapshot()
     if not _has_real_phase29_predictions(phase29_snapshot):
+        st.warning(
+            "Prediction snapshot unavailable. Showing current prices only. Run Full Research or "
+            "check saved forecast artifacts."
+        )
+        st.session_state.phase29_snapshot_source = "placeholder"
         phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+    elif st.session_state.get("phase29_snapshot_notice"):
+        st.warning(str(st.session_state.phase29_snapshot_notice))
     _render_phase29_snapshot(phase29_snapshot)
+
+    latest_report = st.session_state.get("phase29_user_report")
+    latest_warnings = latest_report.get("Warnings", []) if isinstance(latest_report, dict) else []
+    if isinstance(latest_warnings, str):
+        latest_warnings = [latest_warnings]
+    numeric_prices = (
+        int(pd.to_numeric(phase29_snapshot.get("PredictedPrice"), errors="coerce").notna().sum())
+        if "PredictedPrice" in phase29_snapshot.columns else 0
+    )
+    numeric_moves = (
+        int(pd.to_numeric(phase29_snapshot.get("PredictedMovePct"), errors="coerce").notna().sum())
+        if "PredictedMovePct" in phase29_snapshot.columns else 0
+    )
+    with st.expander("Research snapshot diagnostics", expanded=False):
+        st.dataframe(pd.DataFrame([{
+            "SourceUsed": st.session_state.get("phase29_snapshot_source", "placeholder"),
+            "RowCount": int(len(phase29_snapshot)),
+            "NumericPredictedPrices": numeric_prices,
+            "NumericPredictedMoves": numeric_moves,
+        }]), width="stretch", hide_index=True)
+        if latest_warnings:
+            st.markdown("**Latest research warnings**")
+            for warning in latest_warnings:
+                st.warning(_safe_phase29_warning(warning))
+        else:
+            st.caption("No warnings were recorded by the latest research run.")
     _render_candidate_watchlist_section(phase29_snapshot)
     hero_generate_clicked = False
 
