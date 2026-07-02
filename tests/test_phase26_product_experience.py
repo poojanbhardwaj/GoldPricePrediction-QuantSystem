@@ -157,7 +157,7 @@ def test_phase26_primary_navigation_has_no_phase_names_and_advanced_exists():
     assert len(ADVANCED_DIAGNOSTIC_PAGES) >= 45
     app_source = _source("app.py")
     assert '["Advanced Diagnostics"]' in app_source
-    assert "Advanced diagnostic page. Normal users should use Market Research Assistant or Asset Plans first." in app_source
+    assert "Developer-facing diagnostics for source, freshness, artifacts, and snapshot integrity." in app_source
 
 
 def test_phase26_navigation_audit_covers_every_app_route():

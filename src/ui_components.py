@@ -578,7 +578,7 @@ def render_prediction_snapshot_card(row: Mapping[str, Any]) -> None:
 
 def render_cost_summary_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
-    missing_active = str(data.get("ActiveEstimateExplanation", "Run Full Research first to generate an active estimate."))
+    missing_active = "Estimate unavailable"
     st.markdown(
         f'<div class="cost-summary-card"><h3>Cost reality · {_safe(_display_label(data.get("CostVerdict", "MissingEstimate")))}</h3>'
         f'<div class="number-strip"><div><span>Cost drag</span><strong>{_fmt_number(data.get("CostDragPct"), suffix="%")}</strong></div>'
@@ -603,8 +603,8 @@ def render_score_explainer_card(row: Mapping[str, Any]) -> None:
 
 def render_active_vs_passive_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
-    missing_active = str(data.get("ActiveEstimateExplanation", "Run Full Research first to generate an active estimate."))
-    missing_passive = str(data.get("PassiveEstimateExplanation", "No passive benchmark estimate is available for this horizon yet."))
+    missing_active = "Estimate unavailable"
+    missing_passive = "Estimate unavailable"
     st.markdown(
         f'<div class="comparison-card"><h3>Active estimate vs passive benchmark</h3>'
         f'<div class="number-strip"><div><span>Net active</span><strong>{_fmt_number(data.get("NetActiveEstimatePct"), suffix="%", missing=missing_active)}</strong></div>'

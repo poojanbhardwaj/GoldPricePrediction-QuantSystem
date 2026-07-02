@@ -155,7 +155,7 @@ def test_market_assistant_warns_before_rendering_placeholder_and_has_diagnostics
         "Prediction snapshot unavailable. Showing current prices only. Refresh / rebuild the "
         in page_block
     )
-    assert 'st.expander("Research snapshot diagnostics"' in page_block
+    assert 'st.expander("Snapshot Source Diagnostics"' in page_block
     assert page_block.index("_get_phase29_snapshot()") < page_block.index("_phase29_placeholder_snapshot(")
 
 

@@ -244,10 +244,10 @@ def test_app_navigation_places_user_goals_after_evidence_of_edge():
         'elif page == "Paper Research Journey":', 1
     )[0]
 
-    assert navigation.index('"Evidence of Edge"') < navigation.index('"User Goals & Saved Plans"')
-    assert navigation.index('"User Goals & Saved Plans"') < navigation.index('"Asset Plans"')
+    assert navigation.index('"Evidence & Validation"') < navigation.index('"Goals & Saved Plans"')
+    assert navigation.index('"Goals & Saved Plans"') < navigation.index('"Research History & Changes"')
     assert "_render_user_goals_saved_plans()" in page_block
-    assert "App account mode" in page_block
+    assert "Personalized research plan" in page_block
 
 
 def test_user_page_has_no_credential_collection_fields():

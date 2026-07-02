@@ -612,16 +612,78 @@ def _phase29_placeholder_snapshot(prices: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+PRIMARY_PAGE_ALIASES = {
+    "Market Research Assistant": "Research Dashboard",
+    "Evidence of Edge": "Evidence & Validation",
+    "User Goals & Saved Plans": "Goals & Saved Plans",
+    "Cost-Aware Plan": "Cost & Risk Plan",
+    "Portfolio Summary": "Portfolio Research Summary",
+    "Paper Research Journey": "Paper Research Log",
+}
+
+
+def normalize_page_name(page_name: object) -> str:
+    """Return the current public product label for legacy or current page names."""
+    label = str(page_name or "Research Dashboard")
+    return PRIMARY_PAGE_ALIASES.get(label, label)
+
+
+def _set_primary_navigation(destination: str) -> None:
+    st.session_state.primary_product_navigation = normalize_page_name(destination)
+
+
+def _render_grouped_sidebar_navigation(
+    groups: dict[str, list[str]], current_page: str
+) -> str:
+    """Render compact authenticated navigation with visible product sections."""
+    for group_name, pages in groups.items():
+        st.sidebar.caption(group_name)
+        for page_name in pages:
+            st.sidebar.button(
+                page_name,
+                key=f"product_nav_{re.sub(r'[^a-z0-9]+', '_', page_name.casefold()).strip('_')}",
+                type="primary" if page_name == current_page else "secondary",
+                width="stretch",
+                on_click=_set_primary_navigation,
+                args=(page_name,),
+            )
+        if group_name == "Advanced":
+            st.sidebar.caption("Developer-facing diagnostics.")
+    return normalize_page_name(st.session_state.get("primary_product_navigation", current_page))
+
+
+def _render_asset_selector(
+    default_asset: str = DEFAULT_ASSET,
+    *,
+    key: str = "page_research_asset",
+    sidebar: bool = False,
+) -> str:
+    """Render an asset control only inside a page that needs asset context."""
+    assets = get_supported_assets()
+    stored = st.session_state.get("selected_asset", default_asset)
+    selected_default = stored if stored in assets else default_asset
+    container = st.sidebar if sidebar else st
+    selected = container.selectbox(
+        "Research Asset",
+        assets,
+        index=assets.index(selected_default),
+        key=key,
+    )
+    st.session_state.selected_asset = selected
+    return str(selected)
+
+
 def _navigate_primary(destination: str) -> None:
     """Switch primary product pages from a CTA callback and rerun immediately."""
-    if destination in set(PRIMARY_USER_PAGES) | {"Cost-Aware Plan", "Paper Research Journey"}:
-        st.session_state.primary_product_navigation = destination
+    normalized_destination = normalize_page_name(destination)
+    if normalized_destination in set(PRIMARY_PRODUCT_PAGES) | {"Advanced Diagnostics"}:
+        st.session_state.primary_product_navigation = normalized_destination
         st.rerun()
 
 
 def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = None) -> None:
     """Preserve plan context while moving between primary user pages."""
-    set_plan_navigation_state(st.session_state, asset, destination, horizon)
+    set_plan_navigation_state(st.session_state, asset, normalize_page_name(destination), horizon)
     st.rerun()
 
 
@@ -733,11 +795,11 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
     st.markdown("### Research capabilities")
     render_feature_grid([
         {"title": "Candidate Watchlist", "description": "Ranks assets by research quality, evidence, risk, and cost awareness."},
-        {"title": "Evidence of Edge", "description": "Checks whether an idea survives validation metrics and benchmark comparison."},
+        {"title": "Evidence & Validation", "description": "Checks whether an idea survives validation metrics and benchmark comparison."},
         {"title": "Personalized Research Plans", "description": "Turns user goals into watchlist, paper-track, or learn-first plans."},
         {"title": "Forecast Explorer", "description": "Compares horizon-specific estimates with uncertainty-aware wording."},
         {"title": "Risk & Cost Awareness", "description": "Highlights risk labels, cost verdicts, and reasons to avoid weak signals."},
-        {"title": "Paper Research Journey", "description": "Tracks research progress without real-money execution."},
+        {"title": "Paper Research Log", "description": "Tracks research progress without real-money execution."},
     ])
     render_how_it_works([
         "Load or refresh a market snapshot",
@@ -778,7 +840,7 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
 def _render_unlock_prompt() -> None:
     render_professional_hero(
         "Access your research workspace",
-        "Create an app account or sign in to save goals, generate personalized paper-research plans, and review evidence-aware watchlists.",
+        "Create an app account to save research preferences, plans, and history.",
         badges=("App login", "Research-only", "Paper-tracking"),
     )
     st.warning(
@@ -788,8 +850,7 @@ def _render_unlock_prompt() -> None:
         st.success("Verified email authentication is enabled. New accounts must verify email ownership before workspace access.")
     else:
         st.warning(
-            "Local development auth mode. Email ownership is not verified. "
-            "Configure Supabase secrets for verified-email deployment."
+            "Local development auth is active. Email ownership is not verified until Supabase is configured."
         )
 
     st.markdown("### Sign in or Create account")
@@ -815,6 +876,7 @@ def _render_unlock_prompt() -> None:
             email = st.text_input("Email", key="signup_email")
             password = st.text_input("Create password", type="password", key="signup_password")
             confirm_password = st.text_input("Confirm password", type="password", key="signup_confirm_password")
+            st.caption("Use an app password with at least 8 characters, including a letter and a number. Never use a broker or trading password.")
             acknowledge = st.checkbox(
                 "I understand this is a research-only app and not a real-money trading system.",
                 key="signup_research_only_ack",
@@ -897,12 +959,28 @@ def _render_asset_plan_cards(plans: pd.DataFrame, *, show_advanced: bool = False
 
 def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
     if not isinstance(snapshot, pd.DataFrame) or snapshot.empty:
-        render_empty_state("No final snapshot", "Refresh / rebuild research to combine prices, saved estimates, risk, benchmarks, and costs.")
+        render_empty_state(
+            "Snapshot unavailable",
+            "A complete saved or refreshed snapshot is missing. Refresh or rebuild research after login, then check source diagnostics.",
+        )
         return
 
+    research_labels = snapshot.get(
+        "ResearchSourceLabel", pd.Series("Source unavailable", index=snapshot.index)
+    ).astype(str)
+    freshness_labels = snapshot.get(
+        "DataFreshness", pd.Series("Unknown", index=snapshot.index)
+    ).astype(str)
+    snapshot_is_stale = freshness_labels.str.contains("stale", case=False, na=False).any()
+    if research_labels.str.contains("Latest refreshed", case=False, na=False).any() and not snapshot_is_stale:
+        snapshot_heading = "Latest Refreshed Research Snapshot"
+    elif research_labels.str.contains("Saved research", case=False, na=False).any():
+        snapshot_heading = "Saved Research Snapshot"
+    else:
+        snapshot_heading = "Cached Market Snapshot"
     render_section_header(
-        "Current multi-asset snapshot",
-        "Numbers use the latest available project dataset until an explicit refresh is requested.",
+        snapshot_heading,
+        "Every card identifies whether its evidence is refreshed, saved, cached, or stale.",
     )
     render_market_snapshot_grid(
         snapshot,
@@ -984,8 +1062,8 @@ def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> No
     )
     if not _has_real_phase29_predictions(prediction_snapshot):
         render_empty_state(
-            "No candidate rankings",
-            "No saved research snapshot is available yet. Run Full Research to build candidate rankings.",
+            "No candidate table available",
+            "The saved candidate evidence is missing or incomplete. Run or refresh research after login to rebuild candidate evidence.",
         )
         return
 
@@ -1007,8 +1085,8 @@ def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> No
     )
     if watchlist.empty:
         render_empty_state(
-            "No candidate rankings",
-            "No saved research snapshot is available yet. Run Full Research to build candidate rankings.",
+            "No candidate table available",
+            "The saved candidate evidence is missing or incomplete. Run or refresh research after login to rebuild candidate evidence.",
         )
         return
 
@@ -1053,8 +1131,8 @@ def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> No
 def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
     if not _has_real_phase29_predictions(prediction_snapshot):
         render_empty_state(
-            "No edge evidence available",
-            "No saved research snapshot is available yet. Run Full Research before reviewing edge evidence.",
+            "Validation evidence unavailable",
+            "Latest saved validation artifacts may be missing or incomplete. Refresh research after login, then review source diagnostics.",
         )
         return
 
@@ -1234,7 +1312,12 @@ def _render_account_settings_page() -> None:
     preferences = load_user_preferences(user_id) or {}
     plan_runs = list_user_plan_runs(user_id)
     history_runs = load_research_history_runs(user_id)
-    account_mode = "Supabase verified" if current_user.is_email_verified else "Local development"
+    if current_user.auth_provider == "supabase" and current_user.is_email_verified:
+        account_mode = "Supabase verified"
+    elif current_user.auth_provider == "supabase":
+        account_mode = "Supabase unverified"
+    else:
+        account_mode = "Local development auth"
 
     render_metric_grid([
         {"title": "Account mode", "value": account_mode, "subtitle": "Email ownership verified" if current_user.is_email_verified else "Email ownership is not verified", "status": "positive" if current_user.is_email_verified else "warning"},
@@ -1257,12 +1340,17 @@ def _render_account_settings_page() -> None:
             )
 
     supported_assets = get_supported_assets()
+    if not preferences:
+        render_empty_state(
+            "No saved preferences yet",
+            "Choose your default assets, horizon, explanations, landing page, and risk display, then save settings.",
+        )
     saved_assets = [asset for asset in preferences.get("default_assets", supported_assets) if asset in supported_assets]
     saved_horizon = str(preferences.get("default_horizon", "Auto"))
     horizon_choices = ["Auto", "1D", "5D", "10D", "20D", "30D"]
     default_pages = [
-        "Market Research Assistant", "Candidate Watchlist", "Evidence of Edge",
-        "User Goals & Saved Plans", "Research History & Changes", "Asset Plans",
+        "Research Dashboard", "Candidate Watchlist", "Evidence & Validation",
+        "Goals & Saved Plans", "Research History & Changes", "Asset Plans",
     ]
     with st.form("account_research_preferences"):
         display_name = st.text_input("Display name", value=current_user.display_name)
@@ -1275,7 +1363,7 @@ def _render_account_settings_page() -> None:
             "Explanation mode", ["Simple", "Detailed"],
             index=1 if preferences.get("explanation_mode") == "Detailed" else 0,
         )
-        saved_page = str(preferences.get("default_page", "Market Research Assistant"))
+        saved_page = normalize_page_name(preferences.get("default_page", "Research Dashboard"))
         default_page = st.selectbox(
             "Default page after login", default_pages,
             index=default_pages.index(saved_page) if saved_page in default_pages else 0,
@@ -1300,8 +1388,7 @@ def _render_account_settings_page() -> None:
         st.success("Account research settings saved for this user.")
 
     st.warning(
-        "Safety boundary: this account stores research preferences only. It does not accept broker, bank, "
-        "trading-account credentials, execution keys, or real-money settings."
+        "This account stores research preferences and saved plans only. It does not connect to broker, bank, or trading accounts."
     )
 
 
@@ -1915,41 +2002,59 @@ NAVIGATION_GROUPS = {
 
 LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
 PUBLIC_PRODUCT_PAGES = [
-    "Market Research Assistant",
+    "Research Dashboard",
     "Login / Sign Up",
     "About / Methodology",
 ]
 PRIMARY_PRODUCT_PAGES = [
-    "Market Research Assistant",
+    "Research Dashboard",
     "Candidate Watchlist",
-    "Evidence of Edge",
-    "User Goals & Saved Plans",
-    "Research History & Changes",
-    "Asset Plans",
+    "Evidence & Validation",
     "Forecast Explorer",
-    "Cost-Aware Plan",
-    "Portfolio Summary",
-    "Paper Research Journey",
+    "Asset Plans",
+    "Cost & Risk Plan",
+    "Goals & Saved Plans",
+    "Research History & Changes",
+    "Portfolio Research Summary",
+    "Paper Research Log",
     "Account & Settings",
     "About / Methodology",
 ]
+PRIMARY_PRODUCT_GROUPS = {
+    "Dashboard": ["Research Dashboard"],
+    "Research": [
+        "Candidate Watchlist", "Evidence & Validation", "Forecast Explorer",
+        "Asset Plans", "Cost & Risk Plan",
+    ],
+    "Planning": [
+        "Goals & Saved Plans", "Research History & Changes",
+        "Portfolio Research Summary", "Paper Research Log",
+    ],
+    "Account": ["Account & Settings"],
+    "Info": ["About / Methodology"],
+    "Advanced": ["Advanced Diagnostics"],
+}
 GATED_PRODUCT_PAGES = set(PRIMARY_PRODUCT_PAGES) - {
-    "Market Research Assistant",
+    "Research Dashboard",
     "About / Methodology",
 }
 
-navigation_pages = (
-    PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"]
-    if _is_user_unlocked()
-    else PUBLIC_PRODUCT_PAGES
-)
-if st.session_state.get("primary_product_navigation") not in navigation_pages:
-    st.session_state.primary_product_navigation = "Market Research Assistant"
-experience_page = st.sidebar.radio(
-    "Navigate",
-    navigation_pages,
-    key="primary_product_navigation",
-)
+navigation_pages = PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"] if _is_user_unlocked() else PUBLIC_PRODUCT_PAGES
+normalized_navigation = normalize_page_name(st.session_state.get("primary_product_navigation"))
+if normalized_navigation not in navigation_pages:
+    normalized_navigation = "Research Dashboard"
+st.session_state.primary_product_navigation = normalized_navigation
+if _is_user_unlocked():
+    experience_page = _render_grouped_sidebar_navigation(
+        PRIMARY_PRODUCT_GROUPS, normalized_navigation
+    )
+else:
+    st.sidebar.caption("Public")
+    experience_page = st.sidebar.radio(
+        "Navigate",
+        navigation_pages,
+        key="primary_product_navigation",
+    )
 is_advanced_diagnostic = _is_user_unlocked() and experience_page == "Advanced Diagnostics"
 if is_advanced_diagnostic:
     navigation_group = st.sidebar.selectbox("Diagnostic area", list(NAVIGATION_GROUPS), key="navigation_group")
@@ -1961,6 +2066,12 @@ else:
 
 asset_names = get_supported_assets()
 PAGE_ROUTE_ALIASES = {
+    "Research Dashboard": "Market Research Assistant",
+    "Evidence & Validation": "Evidence of Edge",
+    "Goals & Saved Plans": "User Goals & Saved Plans",
+    "Cost & Risk Plan": "Cost-Aware Plan",
+    "Portfolio Research Summary": "Portfolio Summary",
+    "Paper Research Log": "Paper Research Journey",
     "Signal Policy & Edge Repair Lab": "Phase 19: Signal Policy & Edge Repair Lab",
     "Walk-Forward ML Replay": "Phase 20: True Historical ML Replay",
     "Unified Risk Command Center": "Phase 21: Unified Risk Command Center",
@@ -1968,11 +2079,13 @@ PAGE_ROUTE_ALIASES = {
 }
 page = PAGE_ROUTE_ALIASES.get(page_label, page_label)
 horizon_options = get_available_horizons()
-if _is_user_unlocked():
-    default_asset_index = asset_names.index(st.session_state.selected_asset) if st.session_state.selected_asset in asset_names else 0
-    selected_asset = st.sidebar.selectbox("Research Asset", asset_names, index=default_asset_index)
-    st.session_state.selected_asset = selected_asset
-    default_horizon_index = horizon_options.index(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else horizon_options.index(DEFAULT_HORIZON)
+selected_asset = st.session_state.selected_asset if st.session_state.selected_asset in asset_names else DEFAULT_ASSET
+selected_horizon = int(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else DEFAULT_HORIZON
+if is_advanced_diagnostic:
+    selected_asset = _render_asset_selector(
+        selected_asset, key="advanced_research_asset", sidebar=True
+    )
+    default_horizon_index = horizon_options.index(selected_horizon)
     selected_horizon = st.sidebar.selectbox(
         "Research Horizon",
         horizon_options,
@@ -1982,12 +2095,9 @@ if _is_user_unlocked():
     validate_asset_horizon(selected_asset, selected_horizon)
     st.session_state.selected_horizon = int(selected_horizon)
     st.sidebar.caption("Specialized scanners may override the central horizon for batch research.")
-else:
-    selected_asset = st.session_state.selected_asset if st.session_state.selected_asset in asset_names else DEFAULT_ASSET
-    selected_horizon = int(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else DEFAULT_HORIZON
 target_col = get_asset_target(selected_asset)
 
-if _is_user_unlocked() and _asset_mismatch(selected_asset):
+if is_advanced_diagnostic and _asset_mismatch(selected_asset):
     st.sidebar.warning(
         f"Current trained models are for {st.session_state.trained_asset}. "
         f"Train again to use {selected_asset}."
@@ -2001,7 +2111,7 @@ current_auth_user = get_current_auth_user()
 if current_auth_user.is_authenticated and current_auth_user.is_email_verified:
     account_mode_label = "Verified email"
 elif current_auth_user.is_authenticated and current_auth_user.is_local_dev:
-    account_mode_label = "Local development"
+    account_mode_label = "Local development auth"
 else:
     account_mode_label = "Public preview"
 render_product_topbar(
@@ -2015,7 +2125,11 @@ render_product_topbar(
 
 
 if is_advanced_diagnostic:
-    st.info("Advanced diagnostic page. Normal users should use Market Research Assistant or Asset Plans first.")
+    render_premium_header(
+        "Advanced Diagnostics",
+        "Developer-facing diagnostics for source, freshness, artifacts, and snapshot integrity.",
+        "Developer-facing diagnostics",
+    )
 
 
 # ════════════════════════════════════════════════════════════════
@@ -2027,7 +2141,7 @@ if page == "Login / Sign Up":
     render_clean_footer()
     st.stop()
 
-if not _is_user_unlocked() and (page in GATED_PRODUCT_PAGES or is_advanced_diagnostic):
+if not _is_user_unlocked() and (page_label in GATED_PRODUCT_PAGES or is_advanced_diagnostic):
     st.info("Log in to access this research page.")
     _render_unlock_prompt()
     st.stop()
@@ -2038,9 +2152,9 @@ if page == "Market Research Assistant" and not _is_user_unlocked():
 
 if page == "Market Research Assistant":
     render_hero_section(
-        "Multi-Asset Research Intelligence",
-        "Track market ideas with forecasts, costs, risk, and benchmarks in one place",
-        "Review saved research immediately, then refresh or rebuild it to update forecasts, costs, risk, and benchmarks.",
+        "Research-only workspace",
+        "Multi-Asset Research Dashboard",
+        "Review saved and refreshed market snapshots, forecast context, risk labels, and research-only signals across supported assets.",
     )
     render_disclaimer_banner()
     render_blocked_capital_banner()
@@ -2054,13 +2168,13 @@ if page == "Market Research Assistant":
         refresh_market_clicked = st.button("Refresh Market Data", width="stretch", key="phase29_refresh_market")
     with hero_c:
         st.button(
-            "View Cost-Aware Plan", width="stretch", key="phase29_open_cost_plan",
+            "View Cost & Risk Plan", width="stretch", key="phase29_open_cost_plan",
             on_click=_navigate_to_plan,
             args=(selected_asset, "Cost-Aware Plan", int(selected_horizon)),
         )
     with hero_d:
         st.button(
-            "Open Paper Research Journey", width="stretch", key="phase29_open_paper_journey",
+            "Open Paper Research Log", width="stretch", key="phase29_open_paper_journey",
             on_click=_navigate_to_plan,
             args=(selected_asset, "Paper Research Journey", int(selected_horizon)),
         )
@@ -2149,7 +2263,7 @@ if page == "Market Research Assistant":
         "DataFreshness", pd.Series("Unknown", index=phase29_snapshot.index)
     ).astype(str)
     stale_flag = bool(freshness_text.str.contains("stale", case=False, na=False).any())
-    with st.expander("Research snapshot diagnostics", expanded=False):
+    with st.expander("Snapshot Source Diagnostics", expanded=False):
         st.dataframe(pd.DataFrame([{
             "SourceUsed": st.session_state.get("phase29_snapshot_source", "placeholder"),
             "ResearchSourceLabel": research_source_label,
@@ -2300,9 +2414,9 @@ if page == "Market Research Assistant":
 
 elif page == "Candidate Watchlist":
     render_hero_section(
-        "Candidate Watchlist",
-        "Rank saved multi-asset ideas through conservative risk, cost, score, and move-size gates",
         "Research candidates only",
+        "Candidate Watchlist",
+        "Rank assets by evidence quality, risk, cost awareness, and research suitability.",
     )
     render_disclaimer_banner()
 
@@ -2315,9 +2429,9 @@ elif page == "Candidate Watchlist":
 
 elif page == "Evidence of Edge":
     render_hero_section(
-        "Research evidence only",
-        "Evidence of Edge",
-        "Check whether saved candidates survive benchmark, cost, risk, and validation evidence.",
+        "Evidence check",
+        "Evidence & Validation",
+        "Check whether asset ideas survive validation metrics, benchmark comparison, and risk review.",
     )
     render_disclaimer_banner()
 
@@ -2330,9 +2444,9 @@ elif page == "Evidence of Edge":
 
 elif page == "User Goals & Saved Plans":
     render_hero_section(
-        "App account mode",
-        "User Goals & Saved Plans",
-        "Create a personalized paper-research plan without needing to understand every quant metric.",
+        "Personalized research plan",
+        "Goals & Saved Plans",
+        "Turn your goals and risk preferences into personalized paper-research plans.",
     )
     render_disclaimer_banner()
     _render_user_goals_saved_plans()
@@ -2341,7 +2455,7 @@ elif page == "User Goals & Saved Plans":
 elif page == "Research History & Changes":
     render_premium_header(
         "Research History & Changes",
-        "Compare user-owned saved evidence over time without re-scoring past results.",
+        "Compare user-owned saved evidence over time without rescoring past results.",
         "Saved research history",
     )
     render_disclaimer_banner()
@@ -2349,15 +2463,12 @@ elif page == "Research History & Changes":
 
 
 elif page == "Paper Research Journey":
-
-
-    st.markdown("<div class='premium-pill'>Paper Research Journey</div>", unsafe_allow_html=True)
-
-
-    st.markdown("# Build trust through paper research")
-
-
-    st.caption("Track ideas safely, compare them against passive benchmarks, and learn when the system is useful ? without real-money decisions.")
+    render_premium_header(
+        "Paper Research Log",
+        "Track research progress without real-money execution.",
+        "Paper-tracking activity",
+    )
+    st.caption("Use this progress view for paper plans and learning notes. Use Research History & Changes for saved-run comparisons.")
 
 
     st.info("This is a research assistant, not financial advice. It does not execute trades or approve real-money decisions.")
@@ -2391,7 +2502,7 @@ elif page == "Paper Research Journey":
     except Exception as exc:
 
 
-        st.error(f"Paper Research Journey is unavailable: {exc}")
+        st.error(f"Paper Research Log is unavailable: {exc}")
 
 
         st.stop()
@@ -2593,7 +2704,7 @@ elif page == "Paper Research Journey":
                 st.write(f"**Cost verdict:** {plan.get('CostVerdict', 'MissingEstimate')}")
 
 
-                st.write(f"**Break-even return:** {plan.get('BreakEvenReturnPct', 'Not available')}%")
+                st.write(f"**Break-even return:** {plan.get('BreakEvenReturnPct', 'Estimate unavailable')}%")
 
 
                 st.write(f"**What to monitor:** {plan.get('WhatUserShouldMonitorNext')}")
@@ -2634,10 +2745,13 @@ elif page == "Paper Research Journey":
 elif page == "Asset Plans":
     render_premium_header(
         "Asset Plans",
-        "Compare every configured asset and horizon through conservative, plain-language research cards.",
-        "Opportunity ranking",
+        "Review asset-level research plans, required confirmations, and monitoring notes.",
+        "Research plans",
     )
     render_disclaimer_banner()
+    asset_focus = _render_asset_selector(
+        selected_asset, key="asset_plans_research_asset"
+    )
     asset_plans = st.session_state.get("phase26_asset_plans")
     if not isinstance(asset_plans, pd.DataFrame):
         asset_plans = _load_phase26_table("phase26_asset_plans")
@@ -2649,7 +2763,7 @@ elif page == "Asset Plans":
     if asset_plans.empty:
         render_empty_state(
             "No asset plans available",
-            "Open Market Research Assistant and generate a plan from the latest saved evidence first.",
+            "Open Research Dashboard and generate a plan from the latest saved evidence first.",
         )
     else:
         ranked_plans = rank_asset_plans(asset_plans)
@@ -2661,20 +2775,17 @@ elif page == "Asset Plans":
             ["All", "Closest to Track", "Watch", "Wait", "High Risk", "Data Issues"],
             key="phase27_asset_status_filter",
         )
-        filter_a, filter_b, filter_c = st.columns(3)
+        filter_a, filter_b = st.columns(2)
         with filter_a:
-            asset_focus = st.selectbox("Asset focus", ["All assets"] + get_supported_assets(), key="phase26_asset_plan_focus")
-        with filter_b:
             sort_choice = st.selectbox(
                 "Sort by", ["OpportunityScore", "RecheckPriority", "Confidence", "Asset", "Horizon"],
                 key="phase27_asset_plan_sort",
             )
-        with filter_c:
+        with filter_b:
             show_plan_evidence = st.checkbox("Show advanced evidence", value=False, key="phase27_asset_plan_evidence")
 
         display_asset_plans = ranked_plans.copy()
-        if asset_focus != "All assets":
-            display_asset_plans = display_asset_plans[display_asset_plans["Asset"].astype(str).eq(asset_focus)]
+        display_asset_plans = display_asset_plans[display_asset_plans["Asset"].astype(str).eq(asset_focus)]
         status_filters = {
             "Watch": ["Watch"], "Wait": ["Wait", "Not Enough Evidence"],
             "High Risk": ["High Risk", "Avoid"], "Data Issues": ["Data Issue"],
@@ -2742,14 +2853,16 @@ elif page == "Asset Plans":
 elif page == "Forecast Explorer":
     render_premium_header(
         "Forecast Explorer",
-        "Inspect correctly routed price history and saved forecast evidence for one asset and horizon.",
+        "Explore horizon-specific estimates with uncertainty-aware and source-labeled context.",
         "Research estimates",
     )
     render_disclaimer_banner()
     render_glass_container("Forecasts are research estimates, not guarantees.", "Use the forecast with benchmark, regime, risk, and data-freshness evidence rather than as a standalone decision.")
     forecast_a, forecast_b, forecast_c = st.columns(3)
     with forecast_a:
-        explorer_asset = st.selectbox("Asset", get_supported_assets(), index=get_supported_assets().index(selected_asset), key="phase26_forecast_asset")
+        explorer_asset = _render_asset_selector(
+            selected_asset, key="phase26_forecast_asset"
+        )
     with forecast_b:
         explorer_horizon = st.selectbox(
             "Horizon",
@@ -2766,8 +2879,8 @@ elif page == "Forecast Explorer":
     history_rows = {"90 days": 90, "180 days": 180, "1 year": 252, "3 years": 756, "Full history": None}[history_window]
     if market_history.empty or explorer_target not in market_history.columns:
         render_empty_state(
-            f"No cached {explorer_asset} history",
-            "Refresh data from Advanced Diagnostics before using this view. The app will not substitute another asset.",
+            "Forecast unavailable",
+            f"Cached {explorer_asset} history is missing or incomplete. Refresh or rebuild research, then check source diagnostics. The app will not substitute another asset.",
         )
     else:
         selected_history = market_history[[explorer_target]].dropna()
@@ -2828,7 +2941,7 @@ elif page == "Forecast Explorer":
     render_safe_table(
         forecast_table,
         f"{explorer_asset} {int(explorer_horizon)}D Forecast Evidence",
-        "No saved forecast evidence is available for this asset and horizon. This is not treated as a neutral forecast.",
+        "Forecast unavailable. Refresh or rebuild research or check source diagnostics. Missing evidence is not treated as a neutral forecast.",
     )
     if not forecast_table.empty:
         st.download_button(
@@ -2843,9 +2956,9 @@ elif page == "Forecast Explorer":
 
 elif page == "Cost-Aware Plan":
     render_hero_section(
-        "Paper-simulation cost reality",
-        "Understand the cost before tracking an idea",
-        "Adjust brokerage, spread, slippage, taxes, fees, and other assumptions to see how much movement is needed just to break even.",
+        "Cost-aware planning",
+        "Cost & Risk Plan",
+        "Review cost verdicts, risk labels, and reasons to avoid weak or expensive ideas.",
     )
     render_disclaimer_banner()
     st.info(COST_DISCLAIMER)
@@ -2865,7 +2978,9 @@ elif page == "Cost-Aware Plan":
     if st.session_state.get("phase29_cost_horizon") not in get_available_horizons():
         st.session_state.phase29_cost_horizon = int(selected_horizon)
     with cost_a:
-        cost_asset = st.selectbox("Asset", get_supported_assets(), key="phase29_cost_asset")
+        cost_asset = _render_asset_selector(
+            str(st.session_state.phase29_cost_asset), key="phase29_cost_asset"
+        )
     with cost_b:
         cost_horizon = st.selectbox(
             "Horizon", get_available_horizons(), format_func=lambda value: f"{int(value)}D",
@@ -2905,6 +3020,18 @@ elif page == "Cost-Aware Plan":
         selected_plan, amount=simulated_amount, cost_assumptions=assumptions,
     )
     cost_plan["SimplePlan"] = generate_final_user_plan(cost_plan)
+    active_estimate_available = bool(cost_plan.get("ActiveEstimateAvailable", False))
+    passive_estimate_available = bool(cost_plan.get("PassiveEstimateAvailable", False))
+    active_estimate_help = (
+        str(cost_plan.get("ActiveEstimateExplanation", "Active estimate available."))
+        if active_estimate_available
+        else "Estimate unavailable. Refresh or rebuild research to generate an active estimate."
+    )
+    passive_estimate_help = (
+        str(cost_plan.get("PassiveEstimateExplanation", "Passive estimate available."))
+        if passive_estimate_available
+        else "The passive benchmark is available as a comparison reference, but no forward estimate was generated."
+    )
 
     render_section_header("Cost summary", "Gross estimates are reduced by the entered round-trip assumptions.")
     render_metric_grid([
@@ -2912,15 +3039,15 @@ elif page == "Cost-Aware Plan":
         {"title": "Round-trip cost", "value": f"{float(cost_plan.get('EstimatedRoundTripCost', 0)):,.2f}", "subtitle": COST_DISCLAIMER, "status": "warning"},
         {"title": "Cost drag", "value": f"{float(cost_plan.get('CostDragPct', 0)):.2f}%", "subtitle": str(cost_plan.get("CostVerdict", "MissingEstimate")), "status": "warning"},
         {"title": "Break-even return", "value": f"{float(cost_plan.get('BreakEvenReturnPct', 0)):.2f}%", "subtitle": "Movement needed to cover assumptions", "status": "info"},
-        {"title": "Predicted active move", "value": "Run Full Research first" if pd.isna(pd.to_numeric(cost_plan.get("GrossActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossActiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("ActiveEstimateExplanation", "No saved estimate for this horizon yet")), "status": "neutral"},
-        {"title": "Passive benchmark move", "value": "No forward estimate" if pd.isna(pd.to_numeric(cost_plan.get("GrossPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossPassiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("PassiveEstimateExplanation", "The passive benchmark remains a comparison reference")), "status": "neutral"},
-        {"title": "Net active estimate", "value": "Run Full Research first" if pd.isna(pd.to_numeric(cost_plan.get("NetActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetActiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("ActiveEstimateExplanation", "No saved estimate for this horizon yet")), "status": "info"},
-        {"title": "Net passive estimate", "value": "Awaiting benchmark estimate" if pd.isna(pd.to_numeric(cost_plan.get("NetPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetPassiveEstimatePct')):.2f}%", "subtitle": str(cost_plan.get("PassiveEstimateExplanation", "The passive benchmark remains a comparison reference")), "status": "info"},
+        {"title": "Predicted active move", "value": "Estimate unavailable" if pd.isna(pd.to_numeric(cost_plan.get("GrossActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossActiveEstimatePct')):.2f}%", "subtitle": active_estimate_help, "status": "neutral"},
+        {"title": "Passive benchmark move", "value": "Estimate unavailable" if pd.isna(pd.to_numeric(cost_plan.get("GrossPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('GrossPassiveEstimatePct')):.2f}%", "subtitle": passive_estimate_help, "status": "neutral"},
+        {"title": "Net active estimate", "value": "Estimate unavailable" if pd.isna(pd.to_numeric(cost_plan.get("NetActiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetActiveEstimatePct')):.2f}%", "subtitle": active_estimate_help, "status": "info"},
+        {"title": "Net passive estimate", "value": "Estimate unavailable" if pd.isna(pd.to_numeric(cost_plan.get("NetPassiveEstimatePct"), errors="coerce")) else f"{float(cost_plan.get('NetPassiveEstimatePct')):.2f}%", "subtitle": passive_estimate_help, "status": "info"},
     ])
-    if not bool(cost_plan.get("ActiveEstimateAvailable", False)):
-        st.info(str(cost_plan.get("ActiveEstimateExplanation", "Run Full Research first to generate an active estimate.")))
-    if not bool(cost_plan.get("PassiveEstimateAvailable", False)):
-        st.info(str(cost_plan.get("PassiveEstimateExplanation", "No passive benchmark estimate is available for this horizon yet. The benchmark is still shown as a comparison reference.")))
+    if not active_estimate_available:
+        st.info(active_estimate_help)
+    if not passive_estimate_available:
+        st.info(passive_estimate_help)
     if str(cost_plan.get("EstimateComparisonStatus", "")) == "MissingEstimate":
         render_beginner_explanation_box(
             "Missing estimate",
@@ -2946,8 +3073,8 @@ elif page == "Cost-Aware Plan":
 
 elif page == "Portfolio Summary":
     render_premium_header(
-        "Portfolio Summary",
-        "A cross-asset interpretation of opportunity closeness, active blockers, and what deserves the next review.",
+        "Portfolio Research Summary",
+        "Summarize multi-asset research exposure, risk concentration, and planning context.",
         "Portfolio research condition",
     )
     render_disclaimer_banner()
@@ -2965,11 +3092,14 @@ elif page == "Portfolio Summary":
         portfolio_plans = rank_asset_plans(portfolio_plans)
         portfolio_summary = generate_portfolio_plan(portfolio_plans)
     if (not isinstance(portfolio_plans, pd.DataFrame) or portfolio_plans.empty) and not _has_real_phase29_predictions(final_portfolio_snapshot):
-        render_empty_state("No portfolio summary", "Generate a research plan first so the assistant can summarize the saved cross-asset evidence.")
+        render_empty_state(
+            "Portfolio summary unavailable",
+            "Saved plans are missing or incomplete. Generate a personalized plan first so the assistant can summarize cross-asset exposure and risk context.",
+        )
     else:
         summary = portfolio_summary.iloc[0]
         if not final_portfolio_snapshot.empty:
-            render_section_header("Current market snapshot", "Latest available prices with final cost and benchmark context.")
+            render_section_header("Portfolio market context", "Latest available source-labeled prices with final cost and benchmark context.")
             render_market_snapshot_grid(
                 final_portfolio_snapshot,
                 on_view_plan=lambda asset, horizon: _navigate_to_plan(asset, "Asset Plans", horizon),
@@ -2985,16 +3115,16 @@ elif page == "Portfolio Summary":
             highest_opportunity = final_portfolio_snapshot.loc[opportunity_scores.idxmax(), "Asset"] if opportunity_scores.notna().any() else "No scored asset"
             render_metric_grid([
                 {"title": "High Risk assets", "value": int(final_portfolio_snapshot["Status"].eq("High Risk").sum()), "subtitle": "Risk status remains binding", "status": "critical"},
-                {"title": "Average opportunity score", "value": f"{float(opportunity_scores.mean()):.1f}/100" if opportunity_scores.notna().any() else "No saved score", "subtitle": "Research closeness, not expected profit", "status": "info"},
+                {"title": "Average opportunity score", "value": f"{float(opportunity_scores.mean()):.1f}/100" if opportunity_scores.notna().any() else "Score unavailable", "subtitle": "Research closeness, not expected profit", "status": "info"},
                 {"title": "Highest opportunity asset", "value": str(highest_opportunity), "subtitle": "Still subject to its saved risk status", "status": "warning"},
-                {"title": "Average cost drag", "value": f"{float(cost_drag_values.mean()):.2f}%" if cost_drag_values.notna().any() else "No saved cost estimate", "subtitle": COST_DISCLAIMER, "status": "warning"},
+                {"title": "Average cost drag", "value": f"{float(cost_drag_values.mean()):.2f}%" if cost_drag_values.notna().any() else "Estimate unavailable", "subtitle": COST_DISCLAIMER, "status": "warning"},
             ])
             portfolio_gaps = pd.to_numeric(final_portfolio_snapshot.get("ActiveMinusPassiveNetPct"), errors="coerce")
             portfolio_cost_drag = pd.to_numeric(final_portfolio_snapshot.get("CostDragPct"), errors="coerce")
             render_metric_grid([
                 {"title": "Cost-blocked ideas", "value": int(final_portfolio_snapshot["CostVerdict"].eq("CostsTooHighForSignal").sum()), "subtitle": "Estimated move does not clear costs", "status": "warning"},
                 {"title": "Passive benchmark stronger", "value": int(portfolio_gaps.lt(0).sum()), "subtitle": "After entered cost assumptions", "status": "info"},
-                {"title": "Average cost drag", "value": f"{float(portfolio_cost_drag.mean()):.2f}%" if portfolio_cost_drag.notna().any() else "Not available", "subtitle": COST_DISCLAIMER, "status": "warning"},
+                {"title": "Average cost drag", "value": f"{float(portfolio_cost_drag.mean()):.2f}%" if portfolio_cost_drag.notna().any() else "Estimate unavailable", "subtitle": COST_DISCLAIMER, "status": "warning"},
                 {"title": "What to monitor next", "value": "Outcomes + costs", "subtitle": "Then compare with the same passive dates", "status": "neutral"},
             ])
         render_metric_grid(
@@ -3047,7 +3177,7 @@ elif page == "Portfolio Summary":
 elif page == "Account & Settings":
     render_premium_header(
         "Account & Settings",
-        "Manage identity display and user-owned research preferences.",
+        "Manage your research profile, preferences, and account safety context.",
         "Research account",
     )
     render_disclaimer_banner()
@@ -3057,7 +3187,7 @@ elif page == "Account & Settings":
 elif page == "About / Methodology":
     render_premium_header(
         "About / Methodology",
-        "How the research assistant turns technical evidence into simple, conservative plans.",
+        "Understand the research-only design, model workflow, limitations, and safety rules.",
         "Transparent by design",
     )
     render_disclaimer_banner()

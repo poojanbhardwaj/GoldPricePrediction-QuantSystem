@@ -140,16 +140,16 @@ def test_clean_session_hydrates_saved_research_and_phase29_fallback_views():
 
     app.session_state["phase26_asset_plans"] = pd.DataFrame()
     app.session_state["phase26_portfolio_plan"] = pd.DataFrame()
-    app.sidebar.radio[0].set_value("Asset Plans").run(timeout=90)
+    next(button for button in app.sidebar.button if button.label == "Asset Plans").click().run(timeout=90)
     asset_plan_content = "\n".join(str(item.value) for item in app.markdown)
     assert not app.exception
     assert "Predicted price" in asset_plan_content
     assert expected_price in asset_plan_content
 
-    app.sidebar.radio[0].set_value("Portfolio Summary").run(timeout=90)
+    next(button for button in app.sidebar.button if button.label == "Portfolio Research Summary").click().run(timeout=90)
     portfolio_content = "\n".join(str(item.value) for item in app.markdown)
     assert not app.exception
-    assert "Current market snapshot" in portfolio_content
+    assert "Portfolio market context" in portfolio_content
     assert "Average opportunity score" in portfolio_content
     assert "Highest opportunity asset" in portfolio_content
     assert "No portfolio summary" not in portfolio_content

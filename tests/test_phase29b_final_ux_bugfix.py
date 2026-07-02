@@ -131,8 +131,8 @@ def test_app_cost_page_has_helpful_states_and_navigation_rerun():
     )[0]
 
     assert "resolve_horizon_estimates" in cost_page
-    assert "Run Full Research first" in cost_page
-    assert "No forward estimate" in cost_page
+    assert "Estimate unavailable" in cost_page
+    assert "no forward estimate was generated" in cost_page
     assert '"Not available"' not in cost_page
     assert "set_plan_navigation_state" in source
     assert "st.rerun()" in source

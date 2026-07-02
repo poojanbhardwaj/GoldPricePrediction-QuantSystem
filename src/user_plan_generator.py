@@ -486,6 +486,7 @@ def build_phase27_ui_quality_gates(asset_plans: Any, app_source: str = "") -> pd
             headline in source for headline in (
                 "Understand market risk before tracking an asset",
                 "Track market ideas with forecasts, costs, risk, and benchmarks in one place",
+                "Multi-Asset Research Dashboard",
             )
         ),
         "PremiumCardsAvailable": "render_asset_plan_card" in source,

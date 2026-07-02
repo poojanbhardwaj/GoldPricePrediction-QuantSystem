@@ -153,8 +153,7 @@ def test_candidate_watchlist_is_a_first_class_primary_route():
     ast.parse(source)
     navigation = source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
 
-    assert navigation.index('"Market Research Assistant"') < navigation.index('"Candidate Watchlist"')
+    assert navigation.index('"Research Dashboard"') < navigation.index('"Candidate Watchlist"')
     assert navigation.index('"Candidate Watchlist"') < navigation.index('"Asset Plans"')
     assert 'elif page == "Candidate Watchlist":' in source
     assert "_render_candidate_watchlist_section(phase29_snapshot)" in source
-

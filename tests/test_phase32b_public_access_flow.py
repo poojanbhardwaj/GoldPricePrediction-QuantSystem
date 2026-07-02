@@ -23,7 +23,7 @@ from src.ui_components import (
 
 
 PUBLIC_PAGES = [
-    "Market Research Assistant",
+    "Research Dashboard",
     "Login / Sign Up",
     "About / Methodology",
 ]
@@ -67,7 +67,7 @@ def test_public_preview_has_features_and_trust_safety_language():
 
     for feature in (
         "Candidate Watchlist",
-        "Evidence of Edge",
+        "Evidence & Validation",
         "Personalized Research Plans",
         "Risk & Cost Awareness",
     ):
@@ -139,7 +139,7 @@ def test_gated_pages_have_a_login_route_guard():
 
     assert "GATED_PRODUCT_PAGES" in source
     assert 'st.info("Log in to access this research page.")' in source
-    guard = source.split("if not _is_user_unlocked() and (page in GATED_PRODUCT_PAGES", 1)[1]
+    guard = source.split("if not _is_user_unlocked() and (page_label in GATED_PRODUCT_PAGES", 1)[1]
     assert "_render_unlock_prompt()" in guard.split('if page == "Market Research Assistant"', 1)[0]
     assert "st.stop()" in guard.split('if page == "Market Research Assistant"', 1)[0]
 

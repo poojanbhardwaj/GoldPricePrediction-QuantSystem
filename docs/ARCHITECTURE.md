@@ -33,6 +33,10 @@ Public market sources / cached master dataset / checked-in demo artifacts
 
 Market rows are aligned chronologically before feature generation. Direct targets use future shifts only in target construction; target columns are excluded from features. Scalers and model selection remain train/validation scoped. The UI reads session results or explicitly labeled saved/cached artifacts and never silently calls them live data.
 
+## UI Flow
+
+Public visitors see the Research Dashboard preview, login, and methodology only. Authenticated users receive grouped Dashboard, Research, Planning, Account, Info, and Advanced navigation. Premium page labels are normalized to stable internal routes so old sessions and saved page preferences remain compatible. Asset selection is page-scoped and appears only where an asset context is required.
+
 ## Authentication Flow
 
 1. `auth_manager` checks Streamlit secrets for `SUPABASE_URL` and `SUPABASE_ANON_KEY`.
@@ -48,6 +52,10 @@ Profiles, preferences, plan runs, plan rows, and research history carry the appl
 ## Research History Flow
 
 A generated personalized plan combines the current prediction snapshot, watchlist classification, edge evidence, and plan output into one row per asset. Placeholder-only data is rejected. Immutable runs are saved per user, and the latest two runs are compared without rerunning or changing historic scores.
+
+## Data Provenance
+
+Displayed market and forecast evidence carries a source label, latest available date, and freshness state where available. The product distinguishes latest refreshed snapshots, saved research snapshots, cached dataset prices, stale evidence, and unavailable estimates. Fallbacks remain visible in Snapshot Source Diagnostics instead of silently presenting older data as live.
 
 ## Deployment
 

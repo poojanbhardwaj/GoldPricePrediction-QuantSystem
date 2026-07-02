@@ -221,6 +221,51 @@ def test_product_shell_contains_gated_history_and_account_pages():
     assert "GATED_PRODUCT_PAGES" in source
 
 
+def test_primary_navigation_is_grouped_and_legacy_names_are_aliased():
+    source = Path("app.py").read_text(encoding="utf-8")
+    navigation = source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
+    for label in (
+        "Research Dashboard", "Candidate Watchlist", "Evidence & Validation",
+        "Forecast Explorer", "Asset Plans", "Cost & Risk Plan", "Goals & Saved Plans",
+        "Research History & Changes", "Portfolio Research Summary", "Paper Research Log",
+        "Account & Settings", "About / Methodology",
+    ):
+        assert f'"{label}"' in navigation
+    for group in ("Dashboard", "Research", "Planning", "Account", "Info", "Advanced"):
+        assert f'"{group}":' in source
+    assert '"Market Research Assistant": "Research Dashboard"' in source
+    assert '"Evidence of Edge": "Evidence & Validation"' in source
+    assert '"Paper Research Journey": "Paper Research Log"' in source
+    assert "_render_grouped_sidebar_navigation" in source
+
+
+def test_research_asset_selector_is_page_scoped():
+    source = Path("app.py").read_text(encoding="utf-8")
+    navigation_block = source.split("page = PAGE_ROUTE_ALIASES.get", 1)[1].split("target_col =", 1)[0]
+    account_block = source.split('elif page == "Account & Settings":', 1)[1].split('elif page == "About / Methodology":', 1)[0]
+    history_block = source.split('elif page == "Research History & Changes":', 1)[1].split('elif page == "Paper Research Journey":', 1)[0]
+    forecast_block = source.split('elif page == "Forecast Explorer":', 1)[1].split('elif page == "Cost-Aware Plan":', 1)[0]
+    asset_plan_block = source.split('elif page == "Asset Plans":', 1)[1].split('elif page == "Forecast Explorer":', 1)[0]
+
+    assert 'st.sidebar.selectbox("Research Asset"' not in navigation_block
+    assert "_render_asset_selector" not in account_block
+    assert "_render_asset_selector" not in history_block
+    assert "_render_asset_selector" in forecast_block
+    assert "_render_asset_selector" in asset_plan_block
+
+
+def test_polished_source_and_empty_state_language_is_present():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert "Snapshot Source Diagnostics" in source
+    assert "Latest Refreshed Research Snapshot" in source
+    assert "Saved Research Snapshot" in source
+    assert "Cached Market Snapshot" in source
+    assert "No candidate table available" in source
+    assert "Validation evidence unavailable" in source
+    assert "Forecast unavailable" in source
+    assert "Local development auth" in source
+
+
 def test_security_templates_ci_and_optional_auth_dependency_are_present():
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     ignore = Path(".gitignore").read_text(encoding="utf-8")

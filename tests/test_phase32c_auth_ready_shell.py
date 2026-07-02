@@ -237,7 +237,7 @@ def test_topbar_appears_in_public_shell_and_sidebar_remains_navigation_only():
     assert "Sign in / Create account" in [button.label for button in app.button]
     assert "Continue as Demo User" not in [button.label for button in app.button]
     assert app.sidebar.radio[0].options == [
-        "Market Research Assistant",
+        "Research Dashboard",
         "Login / Sign Up",
         "About / Methodology",
     ]
@@ -264,7 +264,7 @@ def test_locked_gated_page_source_has_login_guard():
 
     assert "GATED_PRODUCT_PAGES" in source
     assert "Log in to access this research page." in source
-    guard = source.split("if not _is_user_unlocked() and (page in GATED_PRODUCT_PAGES", 1)[1]
+    guard = source.split("if not _is_user_unlocked() and (page_label in GATED_PRODUCT_PAGES", 1)[1]
     guarded_block = guard.split('if page == "Market Research Assistant"', 1)[0]
     assert "_render_unlock_prompt()" in guarded_block
     assert "st.stop()" in guarded_block

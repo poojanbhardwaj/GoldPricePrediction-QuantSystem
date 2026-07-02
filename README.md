@@ -57,6 +57,8 @@ Screenshot targets for the deployed portfolio:
 
 These paths are intentional placeholders until reviewed deployment screenshots are captured.
 
+See the [Screenshot Checklist](docs/SCREENSHOTS.md) for capture guidance and privacy checks.
+
 ## Local Setup
 
 ```powershell

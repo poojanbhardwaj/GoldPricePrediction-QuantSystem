@@ -289,8 +289,8 @@ def test_evidence_page_is_after_candidate_watchlist_and_language_is_restrained()
         'elif page == "Paper Research Journey":', 1
     )[0]
 
-    assert navigation.index('"Candidate Watchlist"') < navigation.index('"Evidence of Edge"')
-    assert navigation.index('"Evidence of Edge"') < navigation.index('"Asset Plans"')
+    assert navigation.index('"Candidate Watchlist"') < navigation.index('"Evidence & Validation"')
+    assert navigation.index('"Evidence & Validation"') < navigation.index('"Asset Plans"')
     assert "_render_evidence_of_edge_section(phase29_snapshot)" in page_block
     assert FORBIDDEN.search(module_source) is None
     assert FORBIDDEN.search(page_block) is None
