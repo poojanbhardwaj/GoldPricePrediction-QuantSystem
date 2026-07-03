@@ -452,97 +452,234 @@ def _annotate_snapshot_provenance(
     return frame
 
 
-def _get_phase29_snapshot() -> pd.DataFrame:
-    """Load the freshest valid Phase 29 snapshot without manufacturing placeholders."""
-    report = st.session_state.get("phase29_user_report")
-    if isinstance(report, dict):
-        session_snapshot = report.get("AllAssetPredictionSnapshot")
-        if _has_real_phase29_predictions(session_snapshot):
-            snapshot = session_snapshot.copy()
-            source_hint = str(report.get("SnapshotSource", "session"))
-            if source_hint == "Checked-in saved research demo":
-                source_hint = "saved_artifact"
-            elif source_hint not in {"last_good", "saved_artifact"}:
-                source_hint = "session"
-            st.session_state.phase29_last_good_snapshot = snapshot.copy()
-            st.session_state.phase29_snapshot_source = source_hint
-            return snapshot
 
-    last_good_snapshot = st.session_state.get("phase29_last_good_snapshot")
-    if _has_real_phase29_predictions(last_good_snapshot):
-        st.session_state.phase29_snapshot_source = "last_good"
-        return last_good_snapshot.copy()
+# SNAPSHOT_WIRING_FIX_V1
+def _phase29_displayable_snapshot(frame: pd.DataFrame) -> bool:
+    """A dashboard snapshot may be prediction-complete or price-refreshed partial."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "Asset" not in frame.columns:
+        return False
+    has_price = "LatestPrice" in frame.columns and pd.to_numeric(frame["LatestPrice"], errors="coerce").notna().any()
+    has_prediction = _has_real_phase29_predictions(frame)
+    return bool(has_price or has_prediction)
 
-    saved_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
-    if _has_real_phase29_predictions(saved_snapshot):
-        snapshot = saved_snapshot.copy()
-        st.session_state.phase29_last_good_snapshot = snapshot.copy()
-        st.session_state.phase29_snapshot_source = "saved_artifact"
-        return snapshot
-    st.session_state.phase29_snapshot_source = "placeholder"
+
+def _first_existing_column(frame: pd.DataFrame, names: tuple[str, ...]) -> str | None:
+    for name in names:
+        if name in frame.columns:
+            return name
+    return None
+
+
+def _normalize_phase29_snapshot(frame: pd.DataFrame, *, source_label: str) -> pd.DataFrame:
+    """Normalize refreshed/session output into the dashboard's Phase 29 snapshot schema."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return pd.DataFrame()
+
+    out = frame.copy()
+
+    aliases = {
+        "LatestPrice": (
+            "LatestPrice", "CurrentPrice", "current_price", "latest_price",
+            "LastPrice", "last_price", "Close", "Price"
+        ),
+        "PredictedPrice": (
+            "PredictedPrice", "predicted_price", "ForecastPrice", "forecast_price",
+            "Prediction", "Forecast", "PredictedClose", "NextPredictedPrice"
+        ),
+        "PredictedMovePct": (
+            "PredictedMovePct", "PredictedReturnPct", "predicted_return_pct",
+            "predicted_move_pct", "PredictedReturn", "PredictedMove",
+            "ForecastReturnPct", "ExpectedReturnPct", "GrossActiveEstimatePct",
+            "ActiveEstimatePct"
+        ),
+        "BestHorizon": (
+            "BestHorizon", "Horizon", "horizon", "HorizonDays", "ForecastHorizon"
+        ),
+        "LatestPriceDate": (
+            "LatestPriceDate", "LatestSourceDate", "latest_source_date",
+            "SourceDate", "Date"
+        ),
+    }
+
+    for target, choices in aliases.items():
+        if target not in out.columns:
+            source = _first_existing_column(out, choices)
+            if source is not None:
+                out[target] = out[source]
+
+    if "Asset" not in out.columns:
+        return pd.DataFrame()
+
+    if "BestHorizon" not in out.columns:
+        out["BestHorizon"] = DEFAULT_HORIZON if "DEFAULT_HORIZON" in globals() else 5
+    out["BestHorizon"] = pd.to_numeric(out["BestHorizon"], errors="coerce").fillna(
+        DEFAULT_HORIZON if "DEFAULT_HORIZON" in globals() else 5
+    ).astype(int)
+
+    if "LatestPrice" in out.columns:
+        out["LatestPrice"] = pd.to_numeric(out["LatestPrice"], errors="coerce")
+    else:
+        out["LatestPrice"] = np.nan
+
+    if "PredictedPrice" in out.columns:
+        out["PredictedPrice"] = pd.to_numeric(out["PredictedPrice"], errors="coerce")
+    else:
+        out["PredictedPrice"] = np.nan
+
+    if "PredictedMovePct" in out.columns:
+        out["PredictedMovePct"] = pd.to_numeric(out["PredictedMovePct"], errors="coerce")
+    else:
+        out["PredictedMovePct"] = np.nan
+
+    # Fill missing move from price pair when possible.
+    can_make_move = (
+        out["PredictedMovePct"].isna()
+        & out["LatestPrice"].notna()
+        & out["PredictedPrice"].notna()
+        & out["LatestPrice"].ne(0)
+    )
+    out.loc[can_make_move, "PredictedMovePct"] = (
+        (out.loc[can_make_move, "PredictedPrice"] - out.loc[can_make_move, "LatestPrice"])
+        / out.loc[can_make_move, "LatestPrice"]
+        * 100.0
+    )
+
+    # Fill missing predicted price from move when possible.
+    can_make_price = (
+        out["PredictedPrice"].isna()
+        & out["LatestPrice"].notna()
+        & out["PredictedMovePct"].notna()
+    )
+    out.loc[can_make_price, "PredictedPrice"] = (
+        out.loc[can_make_price, "LatestPrice"] * (1.0 + out.loc[can_make_price, "PredictedMovePct"] / 100.0)
+    )
+
+    defaults = {
+        "Status": "Research Snapshot",
+        "OpportunityScore": 0.0,
+        "OpportunityGrade": "Pending",
+        "RiskLabel": "Evidence Review",
+        "CostVerdict": "ReviewRequired",
+        "PassiveBenchmarkName": "Passive benchmark reference",
+        "SimplePlan": "Review refreshed research evidence before making any paper-research decision.",
+        "DataFreshness": "Latest refreshed snapshot" if "refresh" in source_label.lower() else "Session research snapshot",
+        "SnapshotSource": source_label,
+        "ResearchSource": source_label,
+        "PriceSource": source_label,
+        "SourceLabel": source_label,
+    }
+    for column, value in defaults.items():
+        if column not in out.columns:
+            out[column] = value
+
+    return out
+
+
+def _phase29_snapshot_from_report(report: dict) -> pd.DataFrame:
+    """Find the freshest displayable/prediction snapshot inside a run_full_user_research report."""
+    if not isinstance(report, dict):
+        return pd.DataFrame()
+
+    candidate_keys = (
+        "AllAssetPredictionSnapshot",
+        "PredictionSnapshot",
+        "ResearchSnapshot",
+        "AssetPlans",
+        "FinalUserPlans",
+        "CostAwarePlans",
+        "CostAwareAssetPlans",
+    )
+
+    for key in candidate_keys:
+        candidate = report.get(key)
+        normalized = _normalize_phase29_snapshot(candidate, source_label="Latest refreshed session snapshot")
+        if _phase29_displayable_snapshot(normalized):
+            return normalized
+
     return pd.DataFrame()
 
 
-def _store_phase29_run_report(phase29_report: object) -> dict:
-    """Store a completed run without allowing incomplete output to erase good evidence."""
-    report = dict(phase29_report) if isinstance(phase29_report, dict) else {}
-    run_snapshot = report.get("AllAssetPredictionSnapshot")
-    warnings = report.get("Warnings", [])
-    if isinstance(warnings, str):
-        warnings = [warnings]
-    elif not isinstance(warnings, list):
-        warnings = list(warnings) if warnings is not None else []
+def _activate_phase29_report(report: dict, *, refresh: bool) -> dict:
+    """Store refreshed report in the exact session keys used by dashboard and cost plan."""
+    if not isinstance(report, dict):
+        report = {}
 
-    if _has_real_phase29_predictions(run_snapshot):
-        snapshot = run_snapshot.copy()
-        report["AllAssetPredictionSnapshot"] = snapshot
-        if not _has_real_phase29_predictions(report.get("FinalUserPlans")):
-            report["FinalUserPlans"] = snapshot.copy()
-        if not _has_real_phase29_predictions(report.get("CostAwareAssetPlans")):
-            report["CostAwareAssetPlans"] = snapshot.copy()
-        if not _has_real_phase29_predictions(report.get("CostAwarePlans")):
-            report["CostAwarePlans"] = report["CostAwareAssetPlans"].copy()
-        report["SnapshotSource"] = "session"
-        st.session_state.phase29_last_good_snapshot = snapshot.copy()
-        st.session_state.phase29_snapshot_source = "session"
-        st.session_state.phase29_snapshot_notice = None
-    else:
-        fallback = st.session_state.get("phase29_last_good_snapshot")
-        fallback_source = "last_good"
-        if not _has_real_phase29_predictions(fallback):
-            fallback = _get_phase29_snapshot()
-            fallback_source = str(st.session_state.get("phase29_snapshot_source", "saved_artifact"))
+    active = _phase29_snapshot_from_report(report)
 
-        if _has_real_phase29_predictions(fallback):
-            snapshot = fallback.copy()
-            message = (
-                "Latest research run did not produce a complete prediction snapshot, so the app "
-                "is showing the latest saved research snapshot."
+    # If the research run refreshed prices but did not produce model predictions,
+    # still show the refreshed price snapshot instead of falling back to old saved CSVs.
+    if not _phase29_displayable_snapshot(active):
+        prices = _latest_user_price_snapshot()
+        if isinstance(prices, pd.DataFrame) and not prices.empty:
+            active = _normalize_phase29_snapshot(
+                _phase29_placeholder_snapshot(prices),
+                source_label="Latest refreshed price snapshot" if refresh else "Session price snapshot",
             )
-            report["AllAssetPredictionSnapshot"] = snapshot
-            if not _has_real_phase29_predictions(report.get("FinalUserPlans")):
-                report["FinalUserPlans"] = snapshot.copy()
-            if not _has_real_phase29_predictions(report.get("CostAwareAssetPlans")):
-                report["CostAwareAssetPlans"] = snapshot.copy()
-            if not _has_real_phase29_predictions(report.get("CostAwarePlans")):
-                report["CostAwarePlans"] = snapshot.copy()
-            report["SnapshotSource"] = (
-                fallback_source if fallback_source in {"last_good", "saved_artifact"} else "last_good"
-            )
-        else:
-            message = (
-                "No valid prediction snapshot is available yet. Check forecast artifacts and research warnings."
-            )
-            report["AllAssetPredictionSnapshot"] = pd.DataFrame()
-            report["SnapshotSource"] = "placeholder"
-            st.session_state.phase29_snapshot_source = "placeholder"
-        if message not in warnings:
-            warnings.append(message)
-        st.session_state.phase29_snapshot_notice = message
 
-    report["Warnings"] = warnings
+    if _phase29_displayable_snapshot(active):
+        report["AllAssetPredictionSnapshot"] = active
+        report["SnapshotSource"] = "Latest refreshed session snapshot" if refresh else "Session research snapshot"
+        st.session_state.active_research_snapshot = active
+        st.session_state.active_prediction_snapshot = active
+        st.session_state.research_snapshot_source = "session_refresh" if refresh else "session_run"
+        st.session_state.research_snapshot_generated_at = pd.Timestamp.utcnow().isoformat()
+        st.session_state.research_snapshot_complete = True
+        st.session_state.prediction_snapshot_complete = _has_real_phase29_predictions(active)
+
+    cost_plans = report.get("CostAwarePlans")
+    if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
+        cost_plans = report.get("CostAwareAssetPlans")
+    if isinstance(cost_plans, pd.DataFrame) and not cost_plans.empty:
+        st.session_state.active_cost_plan_snapshot = cost_plans
+
     st.session_state.phase29_user_report = report
     return report
+
+
+# STORE_PHASE29_RUN_REPORT_FIX_V1
+def _store_phase29_run_report(report: dict, refresh: bool = False, **kwargs) -> dict:
+    """Compatibility wrapper used by refresh/rebuild flow."""
+    if "refresh" in kwargs:
+        refresh = bool(kwargs.get("refresh"))
+
+    if "_activate_phase29_report" in globals():
+        return _activate_phase29_report(report, refresh=bool(refresh))
+
+    if not isinstance(report, dict):
+        report = {}
+
+    st.session_state.phase29_user_report = report
+
+    snapshot = report.get("AllAssetPredictionSnapshot")
+    if isinstance(snapshot, pd.DataFrame) and not snapshot.empty:
+        st.session_state.active_research_snapshot = snapshot
+        st.session_state.active_prediction_snapshot = snapshot
+        st.session_state.research_snapshot_source = "session_refresh" if refresh else "session_run"
+
+    return report
+
+def _get_phase29_snapshot() -> pd.DataFrame:
+    """Prefer refreshed session snapshot, then session report, then saved artifacts."""
+    active_snapshot = st.session_state.get("active_research_snapshot")
+    if _phase29_displayable_snapshot(active_snapshot):
+        return active_snapshot.copy()
+
+    report = st.session_state.get("phase29_user_report")
+    if isinstance(report, dict):
+        session_snapshot = _phase29_snapshot_from_report(report)
+        if _phase29_displayable_snapshot(session_snapshot):
+            st.session_state.active_research_snapshot = session_snapshot
+            st.session_state.active_prediction_snapshot = session_snapshot
+            return session_snapshot.copy()
+
+    saved_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
+    if _phase29_displayable_snapshot(saved_snapshot):
+        return _normalize_phase29_snapshot(
+            saved_snapshot,
+            source_label="Checked-in saved research snapshot",
+        ).copy()
+
+    return pd.DataFrame()
 
 
 def _phase29_snapshot_as_asset_plans(snapshot: pd.DataFrame) -> pd.DataFrame:
@@ -1004,6 +1141,8 @@ def _render_train_models_diagnostic(
 
     if start_training:
         st.session_state.training_in_progress = True
+        st.session_state.phase29_training_completed = False
+        st.session_state.phase29_training_result_ready = False
         st.session_state.last_training_result = None
         st.session_state.last_training_error = None
         st.session_state.last_training_error_details = None
@@ -1041,6 +1180,8 @@ def _render_train_models_diagnostic(
             st.session_state.trainer = result.ml_trainer or result.dl_trainer
             st.session_state.dl_trainer = result.dl_trainer
             st.session_state.trained = True
+            st.session_state.phase29_training_completed = True
+            st.session_state.phase29_training_result_ready = True
             st.session_state.last_training_result = {
                 "Status": "Complete",
                 "Asset": result.asset,
@@ -1064,6 +1205,8 @@ def _render_train_models_diagnostic(
                 )
                 else "training_failed"
             )
+            st.session_state.phase29_training_completed = False
+            st.session_state.phase29_training_result_ready = False
             training_status.update(label="Training failed", state="error", expanded=True)
         finally:
             st.session_state.training_in_progress = False
@@ -1427,8 +1570,13 @@ def render_advanced_diagnostics(
             )
         target_col = get_asset_target(selected_asset)
 
+        # Train first so model comparison and forecast panels below read the updated session state
+        # during the same Streamlit run after Start Training completes.
+        st.markdown("### Train Models")
+        _render_train_models_diagnostic(selected_asset, selected_horizon, target_col)
+
         _render_advanced_diagnostic_page(
-            "Forecasting & Models", "Forecast Diagnostics",
+            "Forecasting & Models", "Model Training Diagnostics",
             selected_asset, selected_horizon, current_user,
         )
         st.markdown("### Compare Models")
@@ -1436,11 +1584,9 @@ def render_advanced_diagnostics(
         st.markdown("### 30 Days Forecast")
         _render_30_days_forecast_diagnostic(selected_asset, target_col)
         _render_advanced_diagnostic_page(
-            "Forecasting & Models", "Model Training Diagnostics",
+            "Forecasting & Models", "Forecast Diagnostics",
             selected_asset, selected_horizon, current_user,
         )
-        st.markdown("### Train Models")
-        _render_train_models_diagnostic(selected_asset, selected_horizon, target_col)
 
     with st.expander("Research Records"):
         for panel_name in ADVANCED_DIAGNOSTIC_SECTIONS["Research Records"]:
@@ -2899,7 +3045,10 @@ if page == "Market Research Assistant":
                 phase29_report["PriceDisplaySource"] = (
                     "Latest refreshed research snapshot" if refresh_market_clicked else "Cached market snapshot"
                 )
-                st.session_state.phase29_user_report = phase29_report
+                phase29_report = _activate_phase29_report(
+                    phase29_report,
+                    refresh=bool(refresh_market_clicked),
+                )
                 st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
                 st.session_state.phase26_asset_plans = phase29_report.get("AssetPlans")
                 _latest_user_price_snapshot.clear()
