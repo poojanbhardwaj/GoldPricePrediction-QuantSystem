@@ -18,6 +18,7 @@ from src.app_context import (
     validate_asset_horizon,
 )
 from src.artifact_store import list_latest_artifacts, load_latest_artifact, save_phase_artifacts
+from src.research_record_lookup import normalize_asset_key, normalize_horizon_key
 
 
 logger = logging.getLogger(__name__)
@@ -283,13 +284,15 @@ def _filtered_snapshot(
     selected_assets: Sequence[str],
     selected_horizons: Sequence[int],
 ) -> pd.DataFrame:
-    selected_assets = [str(asset) for asset in selected_assets]
-    selected_horizons = [int(horizon) for horizon in selected_horizons]
+    selected_assets = [normalize_asset_key(asset) for asset in selected_assets]
+    selected_horizons = [normalize_horizon_key(horizon) for horizon in selected_horizons]
     if snapshot.empty:
         filtered = _empty_snapshot()
     else:
-        asset_mask = snapshot["Asset"].astype(str).isin(selected_assets + ["ALL", "All", ""])
-        horizon_values = pd.to_numeric(snapshot["Horizon"], errors="coerce").fillna(0).astype(int)
+        asset_mask = snapshot["Asset"].map(normalize_asset_key).isin(selected_assets + ["ALL", ""])
+        horizon_values = snapshot["Horizon"].map(
+            lambda value: normalize_horizon_key(value) if pd.notna(value) else 0
+        )
         horizon_mask = horizon_values.isin(selected_horizons + [0])
         filtered = snapshot.loc[asset_mask & horizon_mask, SNAPSHOT_COLUMNS].copy()
 
@@ -298,8 +301,10 @@ def _filtered_snapshot(
         for horizon in selected_horizons:
             validate_asset_horizon(asset, horizon)
             exact = filtered[
-                filtered["Asset"].astype(str).eq(asset)
-                & pd.to_numeric(filtered["Horizon"], errors="coerce").fillna(0).astype(int).eq(int(horizon))
+                filtered["Asset"].map(normalize_asset_key).eq(asset)
+                & filtered["Horizon"].map(
+                    lambda value: normalize_horizon_key(value) if pd.notna(value) else 0
+                ).eq(int(horizon))
             ]
             if exact.empty:
                 coverage_rows.append(
@@ -331,9 +336,13 @@ def collect_asset_horizon_evidence(
     source = snapshot if isinstance(snapshot, pd.DataFrame) else load_latest_research_snapshot()
     if source.empty:
         return _filtered_snapshot(source, [asset], [horizon])
-    assets = source["Asset"].astype(str)
-    horizons = pd.to_numeric(source["Horizon"], errors="coerce").fillna(0).astype(int)
-    mask = assets.isin([asset, "ALL", "All", ""]) & horizons.isin([int(horizon), 0])
+    assets = source["Asset"].map(normalize_asset_key)
+    horizons = source["Horizon"].map(
+        lambda value: normalize_horizon_key(value) if pd.notna(value) else 0
+    )
+    mask = assets.isin([normalize_asset_key(asset), "ALL", ""]) & horizons.isin(
+        [normalize_horizon_key(horizon), 0]
+    )
     relevant = source.loc[mask, SNAPSHOT_COLUMNS].copy()
     return _filtered_snapshot(relevant, [asset], [horizon])
 

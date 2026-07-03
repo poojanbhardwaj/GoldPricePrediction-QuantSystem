@@ -151,12 +151,14 @@ def test_phase23_quality_gates_exist_and_pass_for_current_app():
 def test_phase23_app_uses_friendly_visible_navigation_and_blocked_capital_language():
     app_source = _source("app.py")
     ast.parse(app_source)
-    navigation = app_source.split("NAVIGATION_GROUPS =", 1)[1].split("navigation_group =", 1)[0]
+    navigation = app_source.split("ADVANCED_DIAGNOSTIC_REGISTRY =", 1)[1].split(
+        "ADVANCED_INTERNAL_ROUTE", 1
+    )[0]
 
-    assert "Guided Research Workflow" in navigation
-    assert "Walk-Forward ML Replay" in navigation
-    assert "Model Edge Benchmark Lab" in navigation
-    assert "Unified Risk Command Center" in navigation
+    assert "Snapshot Overview" in navigation
+    assert "Market Data Refresh" in navigation
+    assert "Train Models" in navigation
+    assert "Navigation State" in navigation
     for phase_number in ("Phase 19", "Phase 20", "Phase 21", "Phase 22"):
         assert phase_number not in navigation
     assert "RealCapitalBlocked" in app_source

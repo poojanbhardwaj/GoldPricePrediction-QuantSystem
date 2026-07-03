@@ -155,7 +155,8 @@ def test_saved_default_page_is_used_after_local_login(monkeypatch, tmp_path):
 
     auth_manager.sign_in_with_email("person@example.com", "StrongPass123", db_path=db_path)
 
-    assert stub.session_state["primary_product_navigation"] == "Candidate Watchlist"
+    assert stub.session_state["_pending_product_navigation"] == "Candidate Watchlist"
+    assert "primary_product_navigation" not in stub.session_state
 
 
 def test_migration_preserves_existing_user(tmp_path):
@@ -213,9 +214,9 @@ def test_no_secret_or_execution_fields_are_added():
 
 def test_product_shell_contains_gated_history_and_account_pages():
     source = Path("app.py").read_text(encoding="utf-8")
-    navigation = source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
-    assert '"Research History & Changes"' in navigation
-    assert '"Account & Settings"' in navigation
+    registry = source.split("PAGE_REGISTRY = {", 1)[1].split("\n}\n\nPRIMARY_PAGE_ALIASES", 1)[0]
+    assert '"Research History & Changes"' in registry
+    assert '"Account & Settings"' in registry
     assert 'elif page == "Research History & Changes":' in source
     assert 'elif page == "Account & Settings":' in source
     assert "GATED_PRODUCT_PAGES" in source
@@ -223,7 +224,7 @@ def test_product_shell_contains_gated_history_and_account_pages():
 
 def test_primary_navigation_is_grouped_and_legacy_names_are_aliased():
     source = Path("app.py").read_text(encoding="utf-8")
-    navigation = source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
+    navigation = source.split("PAGE_REGISTRY = {", 1)[1].split("\n}\n\nPRIMARY_PAGE_ALIASES", 1)[0]
     for label in (
         "Research Dashboard", "Candidate Watchlist", "Evidence & Validation",
         "Forecast Explorer", "Asset Plans", "Cost & Risk Plan", "Goals & Saved Plans",
@@ -232,7 +233,7 @@ def test_primary_navigation_is_grouped_and_legacy_names_are_aliased():
     ):
         assert f'"{label}"' in navigation
     for group in ("Dashboard", "Research", "Planning", "Account", "Info", "Advanced"):
-        assert f'"{group}":' in source
+        assert f'"group": "{group}"' in navigation
     assert '"Market Research Assistant": "Research Dashboard"' in source
     assert '"Evidence of Edge": "Evidence & Validation"' in source
     assert '"Paper Research Journey": "Paper Research Log"' in source

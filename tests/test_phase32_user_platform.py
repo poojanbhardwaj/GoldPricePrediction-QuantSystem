@@ -239,7 +239,7 @@ def test_all_generated_plan_text_avoids_banned_phrases():
 def test_app_navigation_places_user_goals_after_evidence_of_edge():
     app_source = (ROOT / "app.py").read_text(encoding="utf-8")
     ast.parse(app_source)
-    navigation = app_source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
+    navigation = app_source.split("PAGE_REGISTRY = {", 1)[1].split("\n}\n\nPRIMARY_PAGE_ALIASES", 1)[0]
     page_block = app_source.split('elif page == "User Goals & Saved Plans":', 1)[1].split(
         'elif page == "Paper Research Journey":', 1
     )[0]

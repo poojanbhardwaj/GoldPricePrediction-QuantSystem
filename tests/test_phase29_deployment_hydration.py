@@ -82,7 +82,7 @@ def test_research_launch_panel_accepts_snapshot_source_positionally():
 
         render_run_research_panel("session")
         default_html = str(markdown.call_args.args[0])
-        assert "Latest refreshed research is visible for this session." in default_html
+        assert "Latest refreshed research snapshot is visible for this session." in default_html
 
 
 def test_deployment_demo_artifacts_are_narrowly_allowlisted():
@@ -129,7 +129,7 @@ def test_clean_session_hydrates_saved_research_and_phase29_fallback_views():
     main_content = "\n".join(str(item.value) for item in app.markdown)
     assert "Saved research snapshot is visible from the latest checked-in research run" in main_content
     assert "Saved research snapshot" in main_content
-    assert "Cached dataset price" in main_content
+    assert "Cached market snapshot" in main_content
     assert str(first_row["LatestPriceDate"]) in main_content
     assert "Refresh / Rebuild Research" in [button.label for button in app.button]
     assert expected_price in main_content

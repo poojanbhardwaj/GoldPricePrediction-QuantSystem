@@ -9,6 +9,7 @@ from typing import Any, Dict, Mapping, Optional
 import pandas as pd
 
 from src.app_context import AVAILABLE_HORIZONS, SUPPORTED_ASSETS, validate_asset_horizon
+from src.research_record_lookup import normalize_asset_key, normalize_horizon_key
 
 
 PHASE27_PREMIUM_PRODUCT_UI = "phase27_premium_product_ui"
@@ -68,11 +69,14 @@ def _numeric_values(rows: pd.DataFrame, metric_pattern: str) -> list[float]:
 def _relevant_rows(asset: str, horizon: int, evidence: pd.DataFrame) -> pd.DataFrame:
     if evidence.empty:
         return evidence
-    assets = evidence.get("Asset", pd.Series("ALL", index=evidence.index)).astype(str)
-    horizons = pd.to_numeric(
-        evidence.get("Horizon", pd.Series(0, index=evidence.index)), errors="coerce"
-    ).fillna(0).astype(int)
-    return evidence.loc[assets.isin([asset, "ALL", "All", ""]) & horizons.isin([int(horizon), 0])].copy()
+    assets = evidence.get("Asset", pd.Series("ALL", index=evidence.index)).map(normalize_asset_key)
+    horizons = evidence.get("Horizon", pd.Series(0, index=evidence.index)).map(
+        lambda value: normalize_horizon_key(value) if pd.notna(value) else 0
+    )
+    return evidence.loc[
+        assets.isin([normalize_asset_key(asset), "ALL", ""])
+        & horizons.isin([normalize_horizon_key(horizon), 0])
+    ].copy()
 
 
 def _evidence_strength(rows: pd.DataFrame) -> float:

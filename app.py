@@ -3,6 +3,7 @@
 import sys
 import time
 import re
+import traceback
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -25,7 +26,7 @@ from src.feature_intelligence import (
     phase5_feature_columns,
 )
 from src.preprocessing import Preprocessor
-from src.train import ModelTrainer
+from src import model_training_workflow
 from src.predict import Predictor
 from src.visualization import Visualizer
 from src.prediction_ranges import calculate_prediction_range
@@ -44,7 +45,6 @@ from src.app_context import (
 from src.explanation_glossary import glossary_entries
 from src.workflow_guide import run_multiasset_workflow_audit
 from src.research_orchestrator import (
-    ADVANCED_DIAGNOSTIC_PAGES,
     PHASE26_PRODUCT_EXPERIENCE,
     PRIMARY_USER_PAGES,
     build_navigation_audit,
@@ -185,6 +185,7 @@ from src.prediction_edge_improvement import (
     run_prediction_edge_improvement,
 )
 from src.ui_components import (
+    humanize_label,
     inject_premium_css,
     render_asset_plan_card,
     render_active_vs_passive_card,
@@ -226,6 +227,16 @@ from src.ui_components import (
     render_score_explainer_card,
     render_simple_plan_card,
 )
+from src.data_provenance import get_snapshot_freshness_label
+from src.research_record_lookup import (
+    available_asset_keys,
+    available_horizon_keys,
+    find_asset_horizon_record,
+    normalize_asset_display_name,
+    normalize_asset_key,
+    normalize_horizon_key,
+)
+from src.product_navigation import resolve_navigation_label, select_available_page
 from src.artifact_store import (
     build_input_source_table,
     get_artifact_registry,
@@ -399,21 +410,46 @@ def _phase29_public_source_labels(
     """Return plain-language research and price provenance labels."""
     source = str(snapshot_source or "placeholder")
     if source == "session":
-        research_label = "Latest refreshed research"
+        research_label = "Latest refreshed research snapshot"
     elif source in {"saved_artifact", "last_good"}:
         research_label = "Saved research snapshot"
     else:
-        research_label = "Research snapshot unavailable"
+        research_label = "Source unavailable"
 
     report_data = report if isinstance(report, dict) else {}
-    price_label = str(report_data.get("PriceDisplaySource", ""))
-    if price_label not in {"Cached dataset price", "Latest refreshed research"}:
-        price_label = (
-            "Latest refreshed research"
-            if source == "session"
-            else "Cached dataset price"
-        )
+    refreshed_price = str(report_data.get("PriceDisplaySource", "")).casefold().startswith("latest refreshed")
+    price_label = (
+        "Latest refreshed research snapshot"
+        if source == "session" and refreshed_price
+        else "Cached market snapshot"
+    )
     return research_label, price_label
+
+
+def _annotate_snapshot_provenance(
+    snapshot: pd.DataFrame,
+    snapshot_source: object,
+    report: object = None,
+) -> pd.DataFrame:
+    """Add separate source/date/age/freshness display fields to snapshot rows."""
+    if not isinstance(snapshot, pd.DataFrame) or snapshot.empty:
+        return pd.DataFrame() if not isinstance(snapshot, pd.DataFrame) else snapshot.copy()
+    frame = snapshot.copy()
+    research_label, price_label = _phase29_public_source_labels(snapshot_source, report)
+    frame["ResearchSourceLabel"] = research_label
+    frame["PriceSourceLabel"] = price_label
+    date_column = "LatestPriceDate" if "LatestPriceDate" in frame.columns else (
+        "LatestDate" if "LatestDate" in frame.columns else None
+    )
+    latest_dates = frame[date_column] if date_column else pd.Series(pd.NaT, index=frame.index)
+    provenance = latest_dates.map(
+        lambda value: get_snapshot_freshness_label(value, source_type=snapshot_source)
+    )
+    frame["LatestSourceDateLabel"] = provenance.map(lambda item: item["latest_date_label"])
+    frame["SnapshotAgeLabel"] = provenance.map(lambda item: item["age_label"])
+    frame["FreshnessLabel"] = provenance.map(lambda item: item["freshness_label"])
+    frame["SnapshotIsStale"] = provenance.map(lambda item: item["is_stale"])
+    return frame
 
 
 def _get_phase29_snapshot() -> pd.DataFrame:
@@ -549,10 +585,18 @@ def _enrich_plans_with_phase29_predictions(
             "NetActiveEstimatePct", "NetPassiveEstimatePct",
         ) if column in source.columns
     ]
-    extras = source[extra_columns].drop_duplicates(["Asset", "Horizon"], keep="first")
+    source["_AssetKey"] = source["Asset"].map(normalize_asset_key)
+    source["_HorizonKey"] = source["Horizon"].map(normalize_horizon_key)
+    extras = source[extra_columns + ["_AssetKey", "_HorizonKey"]].drop_duplicates(
+        ["_AssetKey", "_HorizonKey"], keep="first"
+    )
     display_fields = [column for column in extra_columns if column not in {"Asset", "Horizon"}]
-    base = plans.drop(columns=[column for column in display_fields if column in plans.columns], errors="ignore")
-    return base.merge(extras, on=["Asset", "Horizon"], how="left")
+    base = plans.drop(columns=[column for column in display_fields if column in plans.columns], errors="ignore").copy()
+    base["_AssetKey"] = base["Asset"].map(normalize_asset_key)
+    base["_HorizonKey"] = base["Horizon"].map(normalize_horizon_key)
+    extras = extras.drop(columns=["Asset", "Horizon"], errors="ignore")
+    merged = base.merge(extras, on=["_AssetKey", "_HorizonKey"], how="left")
+    return merged.drop(columns=["_AssetKey", "_HorizonKey"], errors="ignore")
 
 
 def _hydrate_saved_research_state() -> None:
@@ -579,7 +623,7 @@ def _hydrate_saved_research_state() -> None:
             hydrated_report["CostAwarePlans"] = phase29_cost_plans
             hydrated_report["CostAwareAssetPlans"] = phase29_cost_plans
         hydrated_report["SnapshotSource"] = "Checked-in saved research demo"
-        hydrated_report["PriceDisplaySource"] = "Cached dataset price"
+        hydrated_report["PriceDisplaySource"] = "Cached market snapshot"
         st.session_state.phase29_user_report = hydrated_report
 
     for state_key, table in (
@@ -612,6 +656,23 @@ def _phase29_placeholder_snapshot(prices: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+PAGE_REGISTRY = {
+    "Research Dashboard": {"route": "Market Research Assistant", "group": "Dashboard", "public": True, "title": "Multi-Asset Research Dashboard", "asset_context": False},
+    "Candidate Watchlist": {"route": "Candidate Watchlist", "group": "Research", "public": False, "title": "Candidate Watchlist", "asset_context": False},
+    "Evidence & Validation": {"route": "Evidence of Edge", "group": "Research", "public": False, "title": "Evidence & Validation", "asset_context": False},
+    "Forecast Explorer": {"route": "Forecast Explorer", "group": "Research", "public": False, "title": "Forecast Explorer", "asset_context": True},
+    "Asset Plans": {"route": "Asset Plans", "group": "Research", "public": False, "title": "Asset Plans", "asset_context": True},
+    "Cost & Risk Plan": {"route": "Cost-Aware Plan", "group": "Research", "public": False, "title": "Cost & Risk Plan", "asset_context": True},
+    "Goals & Saved Plans": {"route": "User Goals & Saved Plans", "group": "Planning", "public": False, "title": "Goals & Saved Plans", "asset_context": False},
+    "Research History & Changes": {"route": "Research History & Changes", "group": "Planning", "public": False, "title": "Research History & Changes", "asset_context": False},
+    "Portfolio Research Summary": {"route": "Portfolio Summary", "group": "Planning", "public": False, "title": "Portfolio Research Summary", "asset_context": False},
+    "Paper Research Log": {"route": "Paper Research Journey", "group": "Planning", "public": False, "title": "Paper Research Log", "asset_context": False},
+    "Account & Settings": {"route": "Account & Settings", "group": "Account", "public": False, "title": "Account & Settings", "asset_context": False},
+    "About / Methodology": {"route": "About / Methodology", "group": "Info", "public": True, "title": "About / Methodology", "asset_context": False},
+    "Advanced Diagnostics": {"route": "Advanced Diagnostics", "group": "Advanced", "public": False, "title": "Advanced Diagnostics", "asset_context": True},
+    "Login / Sign Up": {"route": "Login / Sign Up", "group": "Public", "public": True, "title": "Access your research workspace", "asset_context": False},
+}
+
 PRIMARY_PAGE_ALIASES = {
     "Market Research Assistant": "Research Dashboard",
     "Evidence of Edge": "Evidence & Validation",
@@ -619,17 +680,103 @@ PRIMARY_PAGE_ALIASES = {
     "Cost-Aware Plan": "Cost & Risk Plan",
     "Portfolio Summary": "Portfolio Research Summary",
     "Paper Research Journey": "Paper Research Log",
+    "Forecast Model": "Forecast Explorer",
+    "Forecast model": "Forecast Explorer",
+    "Forecast": "Forecast Explorer",
+    "Train Model": "Forecast Explorer",
+    "Train model": "Forecast Explorer",
+    "Forecast and Train Model": "Forecast Explorer",
+    "Forecast & Train Model": "Forecast Explorer",
+    "Forecast / Train Model": "Forecast Explorer",
+    "Forecasting": "Forecast Explorer",
+    "Train Models": "Forecast Explorer",
+    "Train models": "Forecast Explorer",
+    "Model Forecast": "Forecast Explorer",
+    "Model Training": "Forecast Explorer",
+    "Train / Forecast": "Forecast Explorer",
+    "Training & Forecast": "Forecast Explorer",
+    "Advanced": "Advanced Diagnostics",
+    "Advanced diagnostics": "Advanced Diagnostics",
+    "Diagnostics": "Advanced Diagnostics",
+    "Developer Diagnostics": "Advanced Diagnostics",
+    "Snapshot Diagnostics": "Advanced Diagnostics",
 }
+PAGE_ALIASES = PRIMARY_PAGE_ALIASES
+
+PUBLIC_PRODUCT_PAGES = [
+    label for label in ("Research Dashboard", "Login / Sign Up", "About / Methodology")
+    if bool(PAGE_REGISTRY[label]["public"])
+] + ["Advanced Diagnostics"]
+AUTHENTICATED_PRODUCT_PAGES = [
+    label for label in PAGE_REGISTRY if label != "Login / Sign Up"
+]
+PRIMARY_PRODUCT_PAGES = [
+    label for label in AUTHENTICATED_PRODUCT_PAGES if label != "Advanced Diagnostics"
+]
+PRIMARY_PRODUCT_GROUPS = {
+    group: [
+        label for label, config in PAGE_REGISTRY.items()
+        if config["group"] == group and label in AUTHENTICATED_PRODUCT_PAGES
+    ]
+    for group in ("Dashboard", "Research", "Planning", "Account", "Info", "Advanced")
+}
+GATED_PRODUCT_PAGES = {
+    label for label, config in PAGE_REGISTRY.items()
+    if not bool(config["public"]) and label != "Advanced Diagnostics"
+}
+
+PAGE_ROUTE_ALIASES = {
+    label: str(config["route"]) for label, config in PAGE_REGISTRY.items()
+}
+PAGE_ROUTE_ALIASES.update({
+    "Signal Policy & Edge Repair Lab": "Phase 19: Signal Policy & Edge Repair Lab",
+    "Walk-Forward ML Replay": "Phase 20: True Historical ML Replay",
+    "Unified Risk Command Center": "Phase 21: Unified Risk Command Center",
+    "Model Edge Benchmark Lab": "Phase 22: Prediction Edge Improvement",
+})
 
 
 def normalize_page_name(page_name: object) -> str:
     """Return the current public product label for legacy or current page names."""
-    label = str(page_name or "Research Dashboard")
-    return PRIMARY_PAGE_ALIASES.get(label, label)
+    resolved, diagnostic_note = resolve_navigation_label(
+        page_name, PAGE_REGISTRY, PAGE_ALIASES
+    )
+    if diagnostic_note:
+        try:
+            st.session_state["_navigation_normalization_note"] = diagnostic_note
+        except Exception:
+            pass
+    return resolved
+
+
+def queue_product_navigation(page_name: str) -> None:
+    """Queue navigation for a Streamlit callback; callbacks rerun automatically."""
+    normalized = normalize_page_name(page_name)
+    st.session_state["_last_navigation_request"] = normalized
+    st.session_state["_pending_product_navigation"] = normalized
+
+
+def request_product_navigation(page_name: str) -> None:
+    """Queue navigation and rerun when called outside a widget callback."""
+    queue_product_navigation(page_name)
+    st.rerun()
+
+
+def apply_pending_product_navigation() -> None:
+    """Apply queued navigation before any sidebar navigation widget is created."""
+    pending = st.session_state.pop("_pending_product_navigation", None)
+    if pending:
+        st.session_state["primary_product_navigation"] = normalize_page_name(pending)
 
 
 def _set_primary_navigation(destination: str) -> None:
-    st.session_state.primary_product_navigation = normalize_page_name(destination)
+    queue_product_navigation(destination)
+
+
+def _preserve_training_diagnostic_state(asset: str, horizon: int) -> None:
+    """Preserve training context through the button rerun."""
+    st.session_state["selected_asset"] = str(asset)
+    st.session_state["selected_horizon"] = int(horizon)
 
 
 def _render_grouped_sidebar_navigation(
@@ -677,14 +824,18 @@ def _navigate_primary(destination: str) -> None:
     """Switch primary product pages from a CTA callback and rerun immediately."""
     normalized_destination = normalize_page_name(destination)
     if normalized_destination in set(PRIMARY_PRODUCT_PAGES) | {"Advanced Diagnostics"}:
-        st.session_state.primary_product_navigation = normalized_destination
-        st.rerun()
+        queue_product_navigation(normalized_destination)
 
 
 def _navigate_to_plan(asset: str, destination: str, horizon: Optional[int] = None) -> None:
     """Preserve plan context while moving between primary user pages."""
-    set_plan_navigation_state(st.session_state, asset, normalize_page_name(destination), horizon)
-    st.rerun()
+    internal_destination = PAGE_ROUTE_ALIASES.get(normalize_page_name(destination), destination)
+    navigation_update: dict[str, object] = {}
+    set_plan_navigation_state(navigation_update, asset, internal_destination, horizon)
+    for key, value in navigation_update.items():
+        if key != "primary_product_navigation":
+            st.session_state[key] = value
+    queue_product_navigation(destination)
 
 
 def _is_user_unlocked() -> bool:
@@ -698,18 +849,15 @@ def _unlock_demo_user() -> None:
 
 
 def _open_login_page() -> None:
-    st.session_state.primary_product_navigation = "Login / Sign Up"
-    st.rerun()
+    queue_product_navigation("Login / Sign Up")
 
 
 def _logout_demo_user() -> None:
     logout_current_user()
-    st.rerun()
 
 
 def _open_public_methodology() -> None:
-    st.session_state.primary_product_navigation = "About / Methodology"
-    st.rerun()
+    queue_product_navigation("About / Methodology")
 
 
 def _public_market_snapshot() -> pd.DataFrame:
@@ -718,19 +866,601 @@ def _public_market_snapshot() -> pd.DataFrame:
     if isinstance(snapshot, pd.DataFrame) and not snapshot.empty and "LatestPrice" in snapshot.columns:
         frame = snapshot.copy()
         source = str(st.session_state.get("phase29_snapshot_source", "saved_artifact"))
-        frame["PublicSourceLabel"] = (
-            "Latest refreshed snapshot" if source == "session" else "Saved research snapshot"
+        frame = _annotate_snapshot_provenance(
+            frame, source, st.session_state.get("phase29_user_report")
         )
+        frame["PublicSourceLabel"] = frame["ResearchSourceLabel"]
         return frame
     frame = _latest_user_price_snapshot().copy()
     if not frame.empty:
-        frame["PublicSourceLabel"] = "Cached dataset price"
+        frame = _annotate_snapshot_provenance(frame, "cached_dataset")
+        frame["PublicSourceLabel"] = "Cached market snapshot"
     return frame
 
 
 def _public_number(value: object, suffix: str = "", digits: int = 2) -> str:
     numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
     return "Unavailable" if pd.isna(numeric) else f"{float(numeric):,.{digits}f}{suffix}"
+
+
+def _render_product_data_health_diagnostics(
+    asset: str,
+    horizon: int,
+    current_user: object,
+) -> None:
+    """Explain product data health without exposing local paths or credentials."""
+    snapshot = _get_phase29_snapshot()
+    source_type = str(st.session_state.get("phase29_snapshot_source", "placeholder"))
+    plans = st.session_state.get("phase26_asset_plans")
+    if not isinstance(plans, pd.DataFrame) or plans.empty:
+        plans = _load_phase26_table("phase26_asset_plans")
+    research = st.session_state.get("phase26_research_snapshot")
+    if not isinstance(research, pd.DataFrame) or research.empty:
+        research = _load_phase26_table("phase26_research_snapshot")
+    market = _load_cached_market_history()
+    artifacts_found = len(list(Path("artifacts/latest").rglob("*.csv")))
+    user_id = getattr(current_user, "app_user_id", None)
+    history_count = 0
+    saved_plan_count = 0
+    if user_id is not None:
+        try:
+            history_count = len(load_research_history_runs(int(user_id)))
+            saved_plan_count = len(list_user_plan_runs(int(user_id)))
+        except Exception:
+            pass
+    snapshot_date_column = "LatestPriceDate" if "LatestPriceDate" in snapshot.columns else None
+    latest_date = (
+        pd.to_datetime(snapshot[snapshot_date_column], errors="coerce").max()
+        if snapshot_date_column and not snapshot.empty
+        else pd.NaT
+    )
+    freshness = get_snapshot_freshness_label(latest_date, source_type=source_type)
+    try:
+        candidate_count = len(build_candidate_watchlist(snapshot)) if not snapshot.empty else 0
+    except Exception:
+        candidate_count = 0
+    warnings = []
+    report = st.session_state.get("phase29_user_report")
+    if isinstance(report, dict):
+        report_warnings = report.get("Warnings", [])
+        warnings = [report_warnings] if isinstance(report_warnings, str) else list(report_warnings or [])
+
+    render_metric_grid([
+        {"title": "Artifact tables", "value": artifacts_found, "subtitle": "Checked-in CSV evidence files found", "status": "neutral"},
+        {"title": "Dataset rows", "value": len(market), "subtitle": "Cached market snapshot rows", "status": "info"},
+        {"title": "Saved plans", "value": saved_plan_count, "subtitle": "Owned by the signed-in app account", "status": "neutral"},
+        {"title": "Research history", "value": history_count, "subtitle": "Saved comparison runs", "status": "neutral"},
+        {"title": "Candidates", "value": candidate_count, "subtitle": "Resolved from the saved snapshot", "status": "info"},
+        {"title": "Evidence records", "value": len(research), "subtitle": "Normalized saved evidence rows", "status": "neutral"},
+    ])
+    with st.expander("Data health details", expanded=True):
+        st.dataframe(pd.DataFrame([{
+            "SnapshotType": freshness["source_label"],
+            "LatestSourceDate": freshness["latest_date_label"],
+            "SnapshotAge": freshness["age_label"],
+            "Freshness": freshness["freshness_label"],
+            "AvailableAssetKeys": ", ".join(available_asset_keys(plans)),
+            "AvailableHorizonKeys": ", ".join(f"{value}D" for value in available_horizon_keys(plans)),
+            "SelectedAsset": str(asset),
+            "CanonicalAsset": normalize_asset_key(asset),
+            "SelectedHorizon": f"{int(horizon)}D",
+            "CanonicalHorizon": normalize_horizon_key(horizon),
+            "LastRefreshStatus": "Warnings recorded" if warnings else "No run warnings recorded",
+        }]), width="stretch", hide_index=True)
+        if warnings:
+            for warning in warnings:
+                st.warning(_safe_phase29_warning(warning))
+        else:
+            st.caption("No warnings were recorded by the latest research run.")
+        normalization_note = st.session_state.get("_navigation_normalization_note")
+        if normalization_note:
+            st.info(str(normalization_note))
+
+
+def _render_train_models_diagnostic(
+    selected_asset: str,
+    selected_horizon: int,
+    target_col: str,
+) -> None:
+    """Render the existing training workflow inside Advanced Diagnostics."""
+    st.markdown('<p class="main-header">Train Models</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("Select which model families to train, then click **Start Training**.")
+    st.info(
+        f"Training target: **{selected_asset}**, **{int(selected_horizon)}D** research horizon "
+        f"(`{target_col}`). The legacy price model remains a chronological next-step model; "
+        "the selected horizon is retained as research context."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        train_ml = st.checkbox(
+            "Train ML Models (Linear Regression, Trees, Boosting, SVR)",
+            value=True,
+            key="advanced_training_ml_models",
+        )
+    with col2:
+        train_dl = st.checkbox(
+            "Train DL Models (LSTM, BiLSTM, GRU, CNN-LSTM, Transformer)",
+            value=False,
+            key="advanced_training_dl_models",
+        )
+        dl_epochs = int(st.session_state.get("advanced_training_dl_epochs", 10))
+        if train_dl:
+            st.caption("DL training is slower; reduce epochs below for a shorter research run.")
+            dl_epochs = st.slider(
+                "DL Epochs (demo)", 3, 100, dl_epochs, key="advanced_training_dl_epochs"
+            )
+
+    selected_families = [
+        name for name, enabled in (("ML", train_ml), ("DL", train_dl)) if enabled
+    ]
+    start_training = st.button(
+        "Start Training",
+        type="primary",
+        key="advanced_start_training",
+        on_click=_preserve_training_diagnostic_state,
+        args=(selected_asset, int(selected_horizon)),
+    )
+
+    if start_training:
+        st.session_state.training_in_progress = True
+        st.session_state.last_training_result = None
+        st.session_state.last_training_error = None
+        st.session_state.last_training_error_details = None
+        st.session_state.last_training_error_kind = None
+        st.session_state.last_training_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_training_asset = selected_asset
+        st.session_state.last_training_horizon = int(selected_horizon)
+        st.session_state.last_training_model_families = selected_families
+
+        training_status = st.status("Training started", expanded=True)
+        progress = st.progress(0, text="Preparing training run...")
+
+        def _update_training_progress(value: int, message: str) -> None:
+            progress.progress(int(value), text=str(message))
+            training_status.write(str(message))
+
+        try:
+            result = model_training_workflow.run_training_pipeline(
+                asset=selected_asset,
+                horizon=int(selected_horizon),
+                target_col=target_col,
+                train_ml=bool(train_ml),
+                train_dl=bool(train_dl),
+                dl_epochs=int(dl_epochs),
+                load_data=load_raw_data,
+                build_feature_frame=build_features,
+                prepare_data=get_preprocessor_and_data,
+                progress_callback=_update_training_progress,
+            )
+            st.session_state.pp = result.preprocessor
+            st.session_state.data = result.data
+            st.session_state.df_features = result.feature_frame
+            st.session_state.trained_asset = result.asset
+            st.session_state.trained_horizon = result.horizon
+            st.session_state.trainer = result.ml_trainer or result.dl_trainer
+            st.session_state.dl_trainer = result.dl_trainer
+            st.session_state.trained = True
+            st.session_state.last_training_result = {
+                "Status": "Complete",
+                "Asset": result.asset,
+                "Horizon": result.horizon,
+                "ModelFamilies": list(result.model_families),
+                "ModelCount": result.model_count,
+                "Leaderboard": result.leaderboard,
+                "ArtifactPaths": list(result.artifact_paths),
+                "CompletedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            progress.progress(100, text="Training complete.")
+            training_status.update(label="Training complete", state="complete", expanded=False)
+        except Exception as exc:
+            st.session_state.last_training_error = str(exc)
+            st.session_state.last_training_error_details = traceback.format_exc()
+            st.session_state.last_training_error_kind = (
+                "input_unavailable"
+                if isinstance(
+                    exc,
+                    (model_training_workflow.TrainingInputUnavailable, ModuleNotFoundError),
+                )
+                else "training_failed"
+            )
+            training_status.update(label="Training failed", state="error", expanded=True)
+        finally:
+            st.session_state.training_in_progress = False
+
+    last_training_result = st.session_state.get("last_training_result")
+    last_training_error = st.session_state.get("last_training_error")
+    if isinstance(last_training_result, dict):
+        families = ", ".join(last_training_result.get("ModelFamilies", [])) or "None"
+        st.success(
+            f"Training complete for {last_training_result.get('Asset')} at the retained "
+            f"{int(last_training_result.get('Horizon', selected_horizon))}D research horizon."
+        )
+        st.caption(
+            f"Status: {last_training_result.get('Status')} | Model families: {families} | "
+            f"Successful models: {int(last_training_result.get('ModelCount', 0))} | "
+            f"Completed: {last_training_result.get('CompletedAt')}"
+        )
+        board = last_training_result.get("Leaderboard")
+        if isinstance(board, pd.DataFrame) and not board.empty:
+            st.dataframe(board, width="stretch", hide_index=True)
+        artifact_paths = last_training_result.get("ArtifactPaths", [])
+        if artifact_paths:
+            st.caption("Generated artifacts: " + "; ".join(str(path) for path in artifact_paths))
+    elif last_training_error:
+        if st.session_state.get("last_training_error_kind") == "input_unavailable":
+            st.error("Training could not start because required input is unavailable.")
+            st.warning(last_training_error)
+        else:
+            st.error(f"Training failed for the selected configuration: {last_training_error}")
+        with st.expander("Training error details", expanded=False):
+            st.code(st.session_state.get("last_training_error_details") or str(last_training_error))
+    elif st.session_state.trained:
+        st.info("Models already trained this session. Open Compare Models to view results, or retrain above.")
+
+
+def _render_compare_models_diagnostic(selected_asset: str) -> None:
+    """Render the existing model comparison inside Advanced Diagnostics."""
+    st.markdown('<p class="main-header">Model Comparison</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    if not st.session_state.trained:
+        st.warning("No models trained yet. Open Train Models first.")
+        return
+
+    _stop_if_asset_mismatch(selected_asset)
+    trainer = st.session_state.trainer
+    viz = Visualizer()
+    metric = st.selectbox(
+        "Sort/compare by metric",
+        ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"],
+        key="advanced_compare_metric",
+    )
+    board = trainer.get_leaderboard("test")
+    st.dataframe(board, width="stretch")
+    st.markdown("### Baseline Checks")
+    data = st.session_state.data
+    try:
+        baseline_board = price_baseline_leaderboard(data)
+        st.caption(
+            "Baselines use only known price anchors. Naive baseline means tomorrow's price equals today's price."
+        )
+        st.dataframe(baseline_board, width="stretch")
+        summary = model_vs_naive_summary(board, baseline_board)
+        if summary:
+            improvement = summary["rmse_improvement_pct"]
+            if improvement > 0:
+                st.success(
+                    f"Best model **{summary['best_model']}** beats Naive RMSE by **{improvement:.2f}%** "
+                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
+                )
+            else:
+                st.error(
+                    f"Best model **{summary['best_model']}** does not beat Naive RMSE "
+                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
+                )
+    except Exception as exc:
+        st.warning(f"Could not calculate baseline checks: {exc}")
+
+    st.plotly_chart(viz.plot_model_comparison_plotly(board, metric=metric), width="stretch")
+    best_name, best_result = trainer.get_best_model("test")
+    st.success(
+        f"Best model: **{best_name}** | RMSE = {best_result.metrics_test['RMSE']:.2f}, "
+        f"R2 = {best_result.metrics_test['R2']:.4f}"
+    )
+    st.markdown(f"### Actual vs Predicted - {selected_asset} (Best Model)")
+    fig = viz.plot_actual_vs_predicted_plotly(
+        data.prices_test,
+        best_result.predictions_test,
+        data.test_index,
+        title=f"{selected_asset} / {best_name} - Actual vs Predicted",
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) -> None:
+    """Render the existing recursive forecast as a clearly labeled diagnostic."""
+    st.warning(
+        "Legacy diagnostic view - recursive price chaining is not the primary forecasting evidence. "
+        "Use validated direct-horizon and walk-forward results for research conclusions."
+    )
+    st.markdown('<p class="main-header">30-Day Price Forecast</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    if not st.session_state.trained:
+        st.warning("No models trained yet. Open Train Models first.")
+        return
+
+    _stop_if_asset_mismatch(selected_asset)
+    trainer = st.session_state.trainer
+    pp = st.session_state.pp
+    data = st.session_state.data
+    df_features = st.session_state.df_features
+    model_name = st.selectbox(
+        "Select a model for forecasting",
+        list(trainer.results.keys()),
+        key="advanced_forecast_model",
+    )
+    n_days = st.slider(
+        "Forecast horizon (days)", 5, 60, 30, key="advanced_forecast_days"
+    )
+    if not st.button("Generate Forecast", type="primary", key="advanced_generate_forecast"):
+        return
+
+    with st.spinner(f"Generating {n_days}-day forecast..."):
+        result = trainer.results[model_name]
+        predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
+        active_target_col = getattr(pp, "target_col", target_col)
+        ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
+        fe = FeatureEngineer(target_col=active_target_col)
+        try:
+            forecast_df = predictor.forecast(
+                df_features,
+                feature_cols=data.feature_cols,
+                n_days=n_days,
+                indicators_engine=ti,
+                feature_engineer=fe,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            st.info(
+                "The forecast was stopped before model inference. Retrain the selected "
+                "asset model so its saved feature contract matches the current pipeline."
+            )
+            return
+        volatility = df_features["Daily_Return"].std()
+        forecast_df = predictor.add_confidence_bands(
+            forecast_df, historical_volatility=volatility
+        )
+
+    st.success(f"{n_days}-day {selected_asset} forecast generated using {model_name}")
+    viz = Visualizer()
+    figure = viz.plot_forecast_plotly(
+        forecast_df,
+        df_features,
+        target_col=active_target_col,
+        asset_label=selected_asset,
+        n_history_days=90,
+    )
+    st.plotly_chart(figure, width="stretch")
+    st.markdown("### Forecast Table")
+    st.dataframe(forecast_df, width="stretch")
+    st.download_button(
+        "Download Forecast (CSV)",
+        data=forecast_df.to_csv().encode("utf-8"),
+        file_name=(
+            f"{_safe_filename_part(selected_asset)}_"
+            f"{_safe_filename_part(model_name)}_{n_days}day_forecast.csv"
+        ),
+        mime="text/csv",
+    )
+
+
+def _render_advanced_diagnostic_page(
+    diagnostic_area: str,
+    diagnostic_page: str,
+    asset: str,
+    horizon: int,
+    current_user: object,
+) -> None:
+    """Render read-only internal diagnostics without changing product navigation."""
+    render_section_header(
+        str(diagnostic_page),
+        f"{diagnostic_area} · {asset} · {int(horizon)}D · diagnostics only",
+    )
+    snapshot = _get_phase29_snapshot()
+    market = _load_cached_market_history()
+
+    if diagnostic_page == "Snapshot Overview":
+        _render_product_data_health_diagnostics(asset, horizon, current_user)
+    elif diagnostic_page == "Market Data Refresh":
+        st.info(
+            "Diagnostic panel unavailable. Use the existing Research Dashboard refresh control; "
+            "this internal route remains inside Advanced Diagnostics."
+        )
+    elif diagnostic_page == "Source Freshness":
+        render_safe_table(
+            build_data_freshness_table(market),
+            "Asset source freshness",
+            "No usable market observations are available for freshness checks.",
+        )
+    elif diagnostic_page == "Artifact Inventory":
+        inventory = list_latest_artifacts()
+        safe_columns = [
+            column for column in (
+                "Phase", "ArtifactName", "RunId", "CreatedAt", "Rows", "Columns",
+                "AssetsCovered", "HorizonsCovered", "Warnings", "IsLatestValid",
+            ) if column in inventory.columns
+        ]
+        render_safe_table(
+            inventory[safe_columns] if safe_columns else inventory,
+            "Saved artifact inventory",
+            "No registered artifacts are available.",
+        )
+    elif diagnostic_page == "Forecast Diagnostics":
+        record = find_asset_horizon_record(snapshot, asset, horizon)
+        if record:
+            fields = [
+                "Asset", "Horizon", "BestHorizon", "LatestPrice", "LatestPriceDate",
+                "PredictedPrice", "PredictedMovePct", "Status", "OpportunityScore",
+            ]
+            st.dataframe(
+                pd.DataFrame([{field: record.get(field) for field in fields}]),
+                width="stretch",
+                hide_index=True,
+            )
+        else:
+            st.warning(
+                f"No saved forecast record matches {asset} at {int(horizon)}D. "
+                "The app will not substitute another asset or horizon."
+            )
+    elif diagnostic_page == "Model Training Diagnostics":
+        training = st.session_state.get("last_training_result") or {}
+        st.dataframe(pd.DataFrame([{
+            "TrainingInProgress": bool(st.session_state.get("training_in_progress", False)),
+            "LastAsset": st.session_state.get("last_training_asset"),
+            "LastHorizon": st.session_state.get("last_training_horizon"),
+            "ModelFamilies": "; ".join(st.session_state.get("last_training_model_families", [])),
+            "LastStartedAt": st.session_state.get("last_training_started_at"),
+            "LastStatus": training.get("Status", "No session training result"),
+            "SuccessfulModels": training.get("ModelCount", 0),
+            "LastError": st.session_state.get("last_training_error"),
+        }]), width="stretch", hide_index=True)
+    elif diagnostic_page == "Candidate Records":
+        candidates = build_candidate_watchlist(snapshot) if _has_real_phase29_predictions(snapshot) else pd.DataFrame()
+        render_safe_table(candidates, "Candidate records", "No saved candidate records are available.")
+    elif diagnostic_page == "Evidence Records":
+        research = st.session_state.get("phase26_research_snapshot")
+        if not isinstance(research, pd.DataFrame) or research.empty:
+            research = _load_phase26_table("phase26_research_snapshot")
+        evidence = collect_asset_horizon_evidence(asset, int(horizon), research)
+        render_safe_table(evidence, "Evidence records", "No evidence records match this asset and horizon.")
+    elif diagnostic_page == "Asset/Horizon Lookup":
+        record = find_asset_horizon_record(snapshot, asset, horizon)
+        lookup = pd.DataFrame([{
+            "SelectedAsset": asset,
+            "CanonicalAsset": normalize_asset_key(asset),
+            "SelectedHorizon": f"{int(horizon)}D",
+            "CanonicalHorizon": normalize_horizon_key(horizon),
+            "RecordFound": bool(record),
+            "AvailableAssetKeys": ", ".join(available_asset_keys(snapshot)),
+            "AvailableHorizonKeys": ", ".join(f"{value}D" for value in available_horizon_keys(snapshot)),
+        }])
+        st.dataframe(lookup, width="stretch", hide_index=True)
+    elif diagnostic_page in {"Saved Plans", "Research History", "Account Storage"}:
+        user_id = getattr(current_user, "app_user_id", None)
+        if user_id is None:
+            st.info("No app-account storage context is available for this session.")
+        elif diagnostic_page == "Saved Plans":
+            render_safe_table(
+                list_user_plan_runs(int(user_id)), "Saved plan runs", "No saved plan runs are available."
+            )
+        elif diagnostic_page == "Research History":
+            render_safe_table(
+                load_research_history_runs(int(user_id)),
+                "Research history",
+                "No saved research history is available.",
+            )
+        else:
+            st.dataframe(pd.DataFrame([{
+                "Authenticated": bool(getattr(current_user, "is_authenticated", False)),
+                "EmailVerified": bool(getattr(current_user, "is_email_verified", False)),
+                "LocalDevelopmentAuth": bool(getattr(current_user, "is_local_dev", False)),
+                "SavedPlanCount": len(list_user_plan_runs(int(user_id))),
+                "ResearchHistoryCount": len(load_research_history_runs(int(user_id))),
+            }]), width="stretch", hide_index=True)
+    elif diagnostic_page == "Navigation State":
+        st.dataframe(pd.DataFrame([{
+            "active_product_page": st.session_state.get("active_product_page"),
+            "pending_product_navigation": st.session_state.get("_pending_product_navigation"),
+            "primary_product_navigation": st.session_state.get("primary_product_navigation"),
+            "auth_state": "Authenticated" if _is_user_unlocked() else "Public",
+            "last_navigation_request": st.session_state.get("_last_navigation_request"),
+            "product_router_redirected": bool(st.session_state.get("_product_router_redirected", False)),
+        }]), width="stretch", hide_index=True)
+    elif diagnostic_page == "Runtime Health":
+        st.dataframe(pd.DataFrame([{
+            "Python": sys.version.split()[0],
+            "Pandas": pd.__version__,
+            "CachedMarketRows": len(_load_cached_market_history()),
+        }]), width="stretch", hide_index=True)
+    elif diagnostic_page == "Safety Checks":
+        st.dataframe(pd.DataFrame([
+            {"Check": "Real-money execution", "Passed": True, "Explanation": "No broker execution is connected."},
+            {"Check": "Diagnostic routing isolation", "Passed": True, "Explanation": "Internal selections do not write product navigation."},
+            {"Check": "Research artifact separation", "Passed": True, "Explanation": "Diagnostic views do not regenerate research artifacts."},
+        ]), width="stretch", hide_index=True)
+
+
+def render_advanced_diagnostics(
+    selected_asset: str,
+    selected_horizon: int,
+    current_user: object,
+) -> None:
+    """Render all diagnostic panels on one stable product page."""
+    render_premium_header(
+        "Advanced Diagnostics",
+        "Developer-facing diagnostics for data health, forecasts, models, research records, workspace state, and runtime safety.",
+        "Developer-facing diagnostics",
+    )
+
+    if not bool(getattr(current_user, "is_authenticated", False)):
+        for section_name, panels in ADVANCED_DIAGNOSTIC_SECTIONS.items():
+            with st.expander(section_name, expanded=section_name == "Data Health"):
+                for panel_name in panels:
+                    st.markdown(f"#### {panel_name}")
+                    st.caption(
+                        "Diagnostic panel reserved for this check. It stays inside "
+                        "Advanced Diagnostics and does not affect app navigation."
+                    )
+        st.info("Login required for full diagnostics and training controls.")
+        return
+
+    with st.expander("Data Health", expanded=True):
+        for panel_name in ADVANCED_DIAGNOSTIC_SECTIONS["Data Health"]:
+            _render_advanced_diagnostic_page(
+                "Data Health", panel_name, selected_asset, selected_horizon, current_user
+            )
+
+    with st.expander("Forecasting & Models"):
+        st.markdown("### Research context")
+        asset_column, horizon_column = st.columns(2)
+        with asset_column:
+            selected_asset = _render_asset_selector(
+                selected_asset,
+                key="advanced_research_asset",
+            )
+        horizon_options = get_available_horizons()
+        if st.session_state.get("advanced_research_horizon") not in horizon_options:
+            st.session_state["advanced_research_horizon"] = int(selected_horizon)
+        with horizon_column:
+            selected_horizon = st.selectbox(
+                "Research Horizon",
+                horizon_options,
+                format_func=lambda value: f"{int(value)}D",
+                key="advanced_research_horizon",
+            )
+        validate_asset_horizon(selected_asset, selected_horizon)
+        st.session_state.selected_horizon = int(selected_horizon)
+        if _asset_mismatch(selected_asset):
+            st.warning(
+                f"Current trained models are for {st.session_state.trained_asset}. "
+                f"Train again to use {selected_asset}."
+            )
+        target_col = get_asset_target(selected_asset)
+
+        _render_advanced_diagnostic_page(
+            "Forecasting & Models", "Forecast Diagnostics",
+            selected_asset, selected_horizon, current_user,
+        )
+        st.markdown("### Compare Models")
+        _render_compare_models_diagnostic(selected_asset)
+        st.markdown("### 30 Days Forecast")
+        _render_30_days_forecast_diagnostic(selected_asset, target_col)
+        _render_advanced_diagnostic_page(
+            "Forecasting & Models", "Model Training Diagnostics",
+            selected_asset, selected_horizon, current_user,
+        )
+        st.markdown("### Train Models")
+        _render_train_models_diagnostic(selected_asset, selected_horizon, target_col)
+
+    with st.expander("Research Records"):
+        for panel_name in ADVANCED_DIAGNOSTIC_SECTIONS["Research Records"]:
+            _render_advanced_diagnostic_page(
+                "Research Records", panel_name,
+                selected_asset, selected_horizon, current_user,
+            )
+
+    with st.expander("User Workspace"):
+        for panel_name in ADVANCED_DIAGNOSTIC_SECTIONS["User Workspace"]:
+            _render_advanced_diagnostic_page(
+                "User Workspace", panel_name,
+                selected_asset, selected_horizon, current_user,
+            )
+
+    with st.expander("System"):
+        for panel_name in ADVANCED_DIAGNOSTIC_SECTIONS["System"]:
+            _render_advanced_diagnostic_page(
+                "System", panel_name, selected_asset, selected_horizon, current_user
+            )
 
 
 def _render_public_market_teaser(prices: pd.DataFrame) -> None:
@@ -761,7 +1491,7 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
 
     st.markdown("### Public Market Snapshot")
     st.caption(
-        "Current/cached prices and recent market movement. Forecasts, candidate watchlists, "
+        "Saved or cached prices and recent market movement. Forecasts, candidate watchlists, "
         "evidence checks, and personalized saved plans unlock after app login."
     )
     frame = prices.copy() if isinstance(prices, pd.DataFrame) else pd.DataFrame()
@@ -779,9 +1509,11 @@ def _render_public_market_teaser(prices: pd.DataFrame) -> None:
                         st.markdown(f"#### {row.get('Asset', 'Asset')}")
                         st.metric("Latest price", _public_number(row.get("LatestPrice")))
                         latest_date = str(row.get("LatestPriceDate") or "Date unavailable")
-                        source_label = str(row.get("PublicSourceLabel") or "Cached dataset price")
-                        freshness = str(row.get("DataFreshness") or "Unknown freshness")
-                        st.caption(f"{source_label} · {latest_date} · {freshness}")
+                        source_label = str(row.get("PublicSourceLabel") or "Cached market snapshot")
+                        latest_label = str(row.get("LatestSourceDateLabel") or f"Latest source date: {latest_date}")
+                        age_label = str(row.get("SnapshotAgeLabel") or "Snapshot age: Unknown")
+                        freshness_label = str(row.get("FreshnessLabel") or "Freshness: Unknown")
+                        st.caption(f"{source_label} · {latest_label} · {age_label} · {freshness_label}")
                         change_columns = st.columns(3)
                         for change_column, label, field in zip(
                             change_columns,
@@ -1010,16 +1742,23 @@ def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
     compare_a, compare_b, compare_c, compare_d = st.columns(4)
     with compare_a:
         status_values = ["All"] + sorted(snapshot["Status"].dropna().astype(str).unique().tolist())
-        status_filter = st.selectbox("Status", status_values, key="phase29_status_filter")
+        status_filter = st.selectbox(
+            "Status", status_values, format_func=humanize_label, key="phase29_status_filter"
+        )
     with compare_b:
         risk_values = ["All"] + sorted(snapshot.get("RiskLabel", pd.Series(dtype=str)).dropna().astype(str).unique().tolist())
-        risk_filter = st.selectbox("Risk", risk_values, key="phase29_risk_filter")
+        risk_filter = st.selectbox(
+            "Risk", risk_values, format_func=humanize_label, key="phase29_risk_filter"
+        )
     with compare_c:
         freshness_values = ["All"] + sorted(snapshot["DataFreshness"].dropna().astype(str).unique().tolist())
-        freshness_filter = st.selectbox("Freshness", freshness_values, key="phase29_freshness_filter")
+        freshness_filter = st.selectbox(
+            "Freshness", freshness_values, format_func=humanize_label, key="phase29_freshness_filter"
+        )
     with compare_d:
         snapshot_sort = st.selectbox(
             "Sort", ["OpportunityScore", "PredictedMovePct", "CostVerdict", "ActiveMinusPassiveNetPct"],
+            format_func=humanize_label,
             key="phase29_snapshot_sort",
         )
     view = snapshot.copy()
@@ -1036,7 +1775,11 @@ def _render_phase29_snapshot(snapshot: pd.DataFrame) -> None:
         "NetActiveEstimatePct", "NetPassiveEstimatePct", "ActiveMinusPassiveNetPct",
         "CostVerdict", "PassiveBenchmarkName", "TrustScore",
     ) if column in view.columns]
-    st.dataframe(view[columns], width="stretch", hide_index=True)
+    st.dataframe(
+        view[columns].rename(columns={column: humanize_label(column) for column in columns}),
+        width="stretch",
+        hide_index=True,
+    )
 
     ranked = snapshot.sort_values("OpportunityScore", ascending=False, na_position="last")
     cost_blocked = snapshot[snapshot.get("CostVerdict", pd.Series(dtype=str)).eq("CostsTooHighForSignal")].head(3)
@@ -1103,7 +1846,10 @@ def _render_candidate_watchlist_section(prediction_snapshot: pd.DataFrame) -> No
         "Asset", "Category", "Direction", "PredictedMovePct", "PredictedPrice",
         "BestHorizon", "OpportunityScore", "Status", "CostVerdict", "Reason", "UpgradeTrigger",
     ]
-    st.dataframe(watchlist[table_columns], width="stretch", hide_index=True)
+    candidate_display = watchlist[table_columns].copy().rename(
+        columns={column: humanize_label(column) for column in table_columns}
+    )
+    st.dataframe(candidate_display, width="stretch", hide_index=True)
 
     render_section_header(
         "Top-ranked candidates",
@@ -1206,6 +1952,9 @@ def _render_evidence_of_edge_section(prediction_snapshot: pd.DataFrame) -> None:
         )
     display_table["ValidationMetricSource"] = display_table["ValidationMetricSource"].map(
         lambda value: str(value) if pd.notna(value) and str(value).strip() else "Evidence unavailable"
+    )
+    display_table = display_table.rename(
+        columns={column: humanize_label(column) for column in display_table.columns}
     )
     st.dataframe(display_table, width="stretch", hide_index=True)
 
@@ -1746,6 +2495,28 @@ if "backtest_df" not in st.session_state:
     st.session_state.backtest_df = None
 if "trained_asset" not in st.session_state:
     st.session_state.trained_asset = None
+if "trained_horizon" not in st.session_state:
+    st.session_state.trained_horizon = None
+if "dl_trainer" not in st.session_state:
+    st.session_state.dl_trainer = None
+if "training_in_progress" not in st.session_state:
+    st.session_state.training_in_progress = False
+if "last_training_result" not in st.session_state:
+    st.session_state.last_training_result = None
+if "last_training_error" not in st.session_state:
+    st.session_state.last_training_error = None
+if "last_training_error_details" not in st.session_state:
+    st.session_state.last_training_error_details = None
+if "last_training_error_kind" not in st.session_state:
+    st.session_state.last_training_error_kind = None
+if "last_training_started_at" not in st.session_state:
+    st.session_state.last_training_started_at = None
+if "last_training_asset" not in st.session_state:
+    st.session_state.last_training_asset = None
+if "last_training_horizon" not in st.session_state:
+    st.session_state.last_training_horizon = None
+if "last_training_model_families" not in st.session_state:
+    st.session_state.last_training_model_families = []
 if "selected_asset" not in st.session_state:
     st.session_state.selected_asset = DEFAULT_ASSET
 if "selected_horizon" not in st.session_state:
@@ -1931,7 +2702,7 @@ else:
     st.sidebar.caption("Use the top-right product bar to sign in or create an account.")
 st.sidebar.markdown("---")
 
-NAVIGATION_GROUPS = {
+LEGACY_NAVIGATION_GROUPS = {
     "Overview Command Center": ["Overview Command Center", "Guided Research Workflow"],
     "Forecasting & Prediction": [
         "📊 Dataset Explorer", "📈 Technical Indicators", "🤖 Train Models",
@@ -1969,81 +2740,39 @@ NAVIGATION_GROUPS = {
     ],
 }
 
-# Primary users see plain product language. Internal route labels remain unchanged below.
-ADVANCED_FRIENDLY_ROUTES = dict(ADVANCED_DIAGNOSTIC_PAGES)
-NAVIGATION_GROUPS = {
-    "Data & Features": [
-        "Overview Command Center", "Guided Research Workflow", "Dataset Explorer",
-        "Technical Indicators", "Feature Intelligence", "Evidence Store", "About Project",
+# Advanced Diagnostics renders every panel on one stable product page.
+ADVANCED_DIAGNOSTIC_SECTIONS = {
+    "Data Health": [
+        "Snapshot Overview", "Market Data Refresh", "Source Freshness", "Artifact Inventory",
     ],
     "Forecasting & Models": [
-        "Train Models", "Compare Models", "Prediction", "Directional Models",
-        "Direct Forecast Models", "Direct Horizon Scanner", "30-Day Forecast", "Model Edge Benchmark Lab",
+        "Forecast Diagnostics", "Compare Models", "30 Days Forecast",
+        "Model Training Diagnostics", "Train Models",
     ],
-    "Signals & Plans": [
-        "Signal Engine", "Signal Research Scanner", "Signal Policy Sensitivity",
-        "Signal Policy & Edge Repair Lab", "Regime-Aware Meta Signal", "Candidate Deep Diagnostics",
-        "Risk-Controlled Upgrade", "Actionable Research Plan", "Daily Research Control Center",
+    "Research Records": [
+        "Candidate Records", "Evidence Records", "Asset/Horizon Lookup",
     ],
-    "Risk & Regime": [
-        "Risk & Warning Intelligence", "Dynamic Risk Sizing", "Market Regime Intelligence",
-        "Portfolio & Capital Simulator", "Unified Risk Command Center",
+    "User Workspace": [
+        "Saved Plans", "Research History", "Account Storage",
     ],
-    "Backtesting & Replay": [
-        "Backtesting", "Strategy Benchmark Arena", "Historical Model Replay",
-        "Walk-Forward ML Replay", "Walk-Forward Validation",
-    ],
-    "Evidence & Quality Gates": [
-        "Research Validation", "Multi-Asset Matrix", "Meta Decision Audit", "Meta Reliability Grading",
-        "Evidence Expansion", "Evidence Quality Diagnostics", "Probability Calibration",
-        "Forward Paper Evidence", "True Raw Trade Logs", "Raw Trade Log Exporter", "Trade Evidence Ledger",
+    "System": [
+        "Navigation State", "Runtime Health", "Safety Checks",
     ],
 }
-
 LEGACY_PRIMARY_NAVIGATION = list(PRIMARY_USER_PAGES) + ["Advanced Diagnostics"]
-PUBLIC_PRODUCT_PAGES = [
-    "Research Dashboard",
-    "Login / Sign Up",
-    "About / Methodology",
-]
-PRIMARY_PRODUCT_PAGES = [
-    "Research Dashboard",
-    "Candidate Watchlist",
-    "Evidence & Validation",
-    "Forecast Explorer",
-    "Asset Plans",
-    "Cost & Risk Plan",
-    "Goals & Saved Plans",
-    "Research History & Changes",
-    "Portfolio Research Summary",
-    "Paper Research Log",
-    "Account & Settings",
-    "About / Methodology",
-]
-PRIMARY_PRODUCT_GROUPS = {
-    "Dashboard": ["Research Dashboard"],
-    "Research": [
-        "Candidate Watchlist", "Evidence & Validation", "Forecast Explorer",
-        "Asset Plans", "Cost & Risk Plan",
-    ],
-    "Planning": [
-        "Goals & Saved Plans", "Research History & Changes",
-        "Portfolio Research Summary", "Paper Research Log",
-    ],
-    "Account": ["Account & Settings"],
-    "Info": ["About / Methodology"],
-    "Advanced": ["Advanced Diagnostics"],
-}
-GATED_PRODUCT_PAGES = set(PRIMARY_PRODUCT_PAGES) - {
-    "Research Dashboard",
-    "About / Methodology",
-}
 
-navigation_pages = PRIMARY_PRODUCT_PAGES + ["Advanced Diagnostics"] if _is_user_unlocked() else PUBLIC_PRODUCT_PAGES
-normalized_navigation = normalize_page_name(st.session_state.get("primary_product_navigation"))
-if normalized_navigation not in navigation_pages:
-    normalized_navigation = "Research Dashboard"
-st.session_state.primary_product_navigation = normalized_navigation
+apply_pending_product_navigation()
+navigation_pages = AUTHENTICATED_PRODUCT_PAGES if _is_user_unlocked() else PUBLIC_PRODUCT_PAGES
+raw_navigation = st.session_state.get("primary_product_navigation")
+requested_navigation = normalize_page_name(raw_navigation)
+normalized_navigation = requested_navigation
+normalized_navigation = select_available_page(normalized_navigation, navigation_pages)
+st.session_state["_product_router_redirected"] = bool(
+    raw_navigation not in (None, normalized_navigation)
+)
+if raw_navigation != normalized_navigation:
+    st.session_state["_pending_product_navigation"] = normalized_navigation
+    apply_pending_product_navigation()
 if _is_user_unlocked():
     experience_page = _render_grouped_sidebar_navigation(
         PRIMARY_PRODUCT_GROUPS, normalized_navigation
@@ -2055,53 +2784,16 @@ else:
         navigation_pages,
         key="primary_product_navigation",
     )
-is_advanced_diagnostic = _is_user_unlocked() and experience_page == "Advanced Diagnostics"
-if is_advanced_diagnostic:
-    navigation_group = st.sidebar.selectbox("Diagnostic area", list(NAVIGATION_GROUPS), key="navigation_group")
-    group_pages = NAVIGATION_GROUPS[navigation_group]
-    friendly_page = group_pages[0] if len(group_pages) == 1 else st.sidebar.selectbox("Diagnostic page", group_pages, key=f"page_{navigation_group}")
-    page_label = ADVANCED_FRIENDLY_ROUTES.get(friendly_page, friendly_page)
-else:
-    page_label = experience_page
+st.session_state["active_product_page"] = experience_page
+is_advanced_diagnostic = experience_page == "Advanced Diagnostics"
+page_label = experience_page
 
 asset_names = get_supported_assets()
-PAGE_ROUTE_ALIASES = {
-    "Research Dashboard": "Market Research Assistant",
-    "Evidence & Validation": "Evidence of Edge",
-    "Goals & Saved Plans": "User Goals & Saved Plans",
-    "Cost & Risk Plan": "Cost-Aware Plan",
-    "Portfolio Research Summary": "Portfolio Summary",
-    "Paper Research Log": "Paper Research Journey",
-    "Signal Policy & Edge Repair Lab": "Phase 19: Signal Policy & Edge Repair Lab",
-    "Walk-Forward ML Replay": "Phase 20: True Historical ML Replay",
-    "Unified Risk Command Center": "Phase 21: Unified Risk Command Center",
-    "Model Edge Benchmark Lab": "Phase 22: Prediction Edge Improvement",
-}
 page = PAGE_ROUTE_ALIASES.get(page_label, page_label)
 horizon_options = get_available_horizons()
 selected_asset = st.session_state.selected_asset if st.session_state.selected_asset in asset_names else DEFAULT_ASSET
 selected_horizon = int(st.session_state.selected_horizon) if st.session_state.selected_horizon in horizon_options else DEFAULT_HORIZON
-if is_advanced_diagnostic:
-    selected_asset = _render_asset_selector(
-        selected_asset, key="advanced_research_asset", sidebar=True
-    )
-    default_horizon_index = horizon_options.index(selected_horizon)
-    selected_horizon = st.sidebar.selectbox(
-        "Research Horizon",
-        horizon_options,
-        index=default_horizon_index,
-        format_func=lambda value: f"{int(value)}D",
-    )
-    validate_asset_horizon(selected_asset, selected_horizon)
-    st.session_state.selected_horizon = int(selected_horizon)
-    st.sidebar.caption("Specialized scanners may override the central horizon for batch research.")
 target_col = get_asset_target(selected_asset)
-
-if is_advanced_diagnostic and _asset_mismatch(selected_asset):
-    st.sidebar.warning(
-        f"Current trained models are for {st.session_state.trained_asset}. "
-        f"Train again to use {selected_asset}."
-    )
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Research assistant | Login required for workspace")
@@ -2124,14 +2816,6 @@ render_product_topbar(
 )
 
 
-if is_advanced_diagnostic:
-    render_premium_header(
-        "Advanced Diagnostics",
-        "Developer-facing diagnostics for source, freshness, artifacts, and snapshot integrity.",
-        "Developer-facing diagnostics",
-    )
-
-
 # ════════════════════════════════════════════════════════════════
 # PAGE: HOME
 # ════════════════════════════════════════════════════════════════
@@ -2141,13 +2825,22 @@ if page == "Login / Sign Up":
     render_clean_footer()
     st.stop()
 
-if not _is_user_unlocked() and (page_label in GATED_PRODUCT_PAGES or is_advanced_diagnostic):
+if not _is_user_unlocked() and page_label in GATED_PRODUCT_PAGES:
     st.info("Log in to access this research page.")
     _render_unlock_prompt()
     st.stop()
 
 if page == "Market Research Assistant" and not _is_user_unlocked():
     _render_public_market_teaser(_public_market_snapshot())
+    st.stop()
+
+if is_advanced_diagnostic:
+    render_advanced_diagnostics(
+        selected_asset,
+        int(selected_horizon),
+        current_auth_user,
+    )
+    render_clean_footer()
     st.stop()
 
 if page == "Market Research Assistant":
@@ -2204,7 +2897,7 @@ if page == "Market Research Assistant":
                     refresh=bool(refresh_market_clicked),
                 ))
                 phase29_report["PriceDisplaySource"] = (
-                    "Latest refreshed research" if refresh_market_clicked else "Cached dataset price"
+                    "Latest refreshed research snapshot" if refresh_market_clicked else "Cached market snapshot"
                 )
                 st.session_state.phase29_user_report = phase29_report
                 st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
@@ -2223,7 +2916,7 @@ if page == "Market Research Assistant":
     phase29_snapshot = _get_phase29_snapshot()
     if not _has_real_phase29_predictions(phase29_snapshot):
         st.warning(
-            "Prediction snapshot unavailable. Showing current prices only. Refresh / rebuild the "
+            "Prediction snapshot unavailable. Showing cached market prices only. Refresh / rebuild the "
             "research snapshot or check saved forecast artifacts."
         )
         st.session_state.phase29_snapshot_source = "placeholder"
@@ -2234,9 +2927,11 @@ if page == "Market Research Assistant":
     research_source_label, price_source_label = _phase29_public_source_labels(
         st.session_state.get("phase29_snapshot_source", "placeholder"), latest_report
     )
-    phase29_snapshot = phase29_snapshot.copy()
-    phase29_snapshot["ResearchSourceLabel"] = research_source_label
-    phase29_snapshot["PriceSourceLabel"] = price_source_label
+    phase29_snapshot = _annotate_snapshot_provenance(
+        phase29_snapshot,
+        st.session_state.get("phase29_snapshot_source", "placeholder"),
+        latest_report,
+    )
     _render_phase29_snapshot(phase29_snapshot)
 
     latest_warnings = latest_report.get("Warnings", []) if isinstance(latest_report, dict) else []
@@ -2779,13 +3474,16 @@ elif page == "Asset Plans":
         with filter_a:
             sort_choice = st.selectbox(
                 "Sort by", ["OpportunityScore", "RecheckPriority", "Confidence", "Asset", "Horizon"],
+                format_func=humanize_label,
                 key="phase27_asset_plan_sort",
             )
         with filter_b:
             show_plan_evidence = st.checkbox("Show advanced evidence", value=False, key="phase27_asset_plan_evidence")
 
         display_asset_plans = ranked_plans.copy()
-        display_asset_plans = display_asset_plans[display_asset_plans["Asset"].astype(str).eq(asset_focus)]
+        display_asset_plans = display_asset_plans[
+            display_asset_plans["Asset"].map(normalize_asset_key).eq(normalize_asset_key(asset_focus))
+        ]
         status_filters = {
             "Watch": ["Watch"], "Wait": ["Wait", "Not Enough Evidence"],
             "High Risk": ["High Risk", "Avoid"], "Data Issues": ["Data Issue"],
@@ -2819,15 +3517,36 @@ elif page == "Asset Plans":
             detail_index = detail_options.index(detail_choice)
             detail_row = display_asset_plans.iloc[detail_index].to_dict()
             saved_final = _get_phase29_snapshot()
-            final_match = saved_final[
-                saved_final["Asset"].astype(str).eq(str(detail_row.get("Asset")))
-                & pd.to_numeric(saved_final["BestHorizon"], errors="coerce").eq(int(detail_row.get("Horizon", 0)))
-            ] if not saved_final.empty else pd.DataFrame()
-            if not final_match.empty:
-                detail_row.update(final_match.iloc[0].to_dict())
-            else:
-                detail_row = generate_cost_aware_asset_plan(detail_row, amount=10000, cost_assumptions=default_cost_assumptions(str(detail_row.get("Asset"))))
-                detail_row["SimplePlan"] = generate_final_user_plan(detail_row)
+            detail_asset = normalize_asset_display_name(detail_row.get("Asset"))
+            detail_horizon = normalize_horizon_key(detail_row.get("Horizon"))
+            final_record = find_asset_horizon_record(saved_final, detail_asset, detail_horizon)
+            if final_record:
+                detail_row.update(final_record)
+            research_snapshot = st.session_state.get("phase26_research_snapshot")
+            if not isinstance(research_snapshot, pd.DataFrame) or research_snapshot.empty:
+                research_snapshot = _load_phase26_table("phase26_research_snapshot")
+            exact_estimates = resolve_horizon_estimates(
+                detail_asset,
+                detail_horizon,
+                research_snapshot=research_snapshot,
+                master_dataset=_load_cached_market_history(),
+            )
+            detail_row.update({key: value for key, value in exact_estimates.items() if value is not None})
+            detail_row.update({"Asset": detail_asset, "Horizon": detail_horizon})
+            detail_row = generate_cost_aware_asset_plan(
+                detail_row,
+                amount=10000,
+                cost_assumptions=default_cost_assumptions(detail_asset),
+            )
+            detail_row["SimplePlan"] = generate_final_user_plan(detail_row)
+            source_type = str(st.session_state.get("phase29_snapshot_source", "saved_artifact"))
+            provenance = get_snapshot_freshness_label(
+                detail_row.get("LatestPriceDate"), source_type=source_type
+            )
+            st.caption(
+                f"{provenance['source_label']} · {provenance['latest_date_label']} · "
+                f"{provenance['age_label']} · {provenance['freshness_label']}"
+            )
             detail_a, detail_b = st.columns(2)
             with detail_a:
                 render_score_explainer_card(detail_row)
@@ -2835,6 +3554,17 @@ elif page == "Asset Plans":
             with detail_b:
                 render_active_vs_passive_card(detail_row)
                 render_simple_plan_card(detail_row)
+            with st.expander("Record lookup diagnostics", expanded=False):
+                st.dataframe(pd.DataFrame([{
+                    "SelectedAsset": str(detail_row.get("Asset", "")),
+                    "SelectedHorizon": f"{detail_horizon}D",
+                    "CanonicalAssetKey": normalize_asset_key(detail_asset),
+                    "CanonicalHorizonKey": detail_horizon,
+                    "RecordFound": bool(find_asset_horizon_record(asset_plans, detail_asset, detail_horizon)),
+                    "AvailableAssetKeys": ", ".join(available_asset_keys(asset_plans)),
+                    "AvailableHorizonKeys": ", ".join(f"{value}D" for value in available_horizon_keys(asset_plans)),
+                    "Source": "Saved research snapshot",
+                }]), width="stretch", hide_index=True)
 
         high_risk_explanations = build_high_risk_explanations(ranked_plans)
         monitoring_plan = build_monitoring_plan(ranked_plans)
@@ -2913,28 +3643,57 @@ elif page == "Forecast Explorer":
         explorer_plans = _load_phase26_table("phase26_asset_plans")
     if not explorer_plans.empty:
         explorer_plans = rank_asset_plans(explorer_plans)
-    current_plan = explorer_plans[
-        explorer_plans.get("Asset", pd.Series(dtype=str)).astype(str).eq(explorer_asset)
-        & pd.to_numeric(explorer_plans.get("Horizon", pd.Series(dtype=float)), errors="coerce").eq(int(explorer_horizon))
-    ] if not explorer_plans.empty else pd.DataFrame()
-    if not current_plan.empty:
-        row = current_plan.iloc[0]
-        render_status_card("Current research status", row.get("Status", "Not Enough Evidence"), row.get("Summary", ""), _status_card_style(str(row.get("Status", ""))))
+    current_plan_record = find_asset_horizon_record(
+        explorer_plans, explorer_asset, explorer_horizon
+    ) if not explorer_plans.empty else None
+    if current_plan_record:
+        render_status_card(
+            "Saved research status",
+            humanize_label(current_plan_record.get("Status", "Not Enough Evidence")),
+            current_plan_record.get("Summary", ""),
+            _status_card_style(str(current_plan_record.get("Status", ""))),
+        )
 
     final_snapshot = _get_phase29_snapshot()
-    matching_final = final_snapshot[final_snapshot["Asset"].astype(str).eq(explorer_asset)] if isinstance(final_snapshot, pd.DataFrame) and not final_snapshot.empty else pd.DataFrame()
-    if not matching_final.empty and int(matching_final.iloc[0].get("BestHorizon", 0) or 0) == int(explorer_horizon):
-        render_prediction_snapshot_card(matching_final.iloc[0].to_dict())
-        render_cost_summary_card(matching_final.iloc[0].to_dict())
+    final_record = find_asset_horizon_record(final_snapshot, explorer_asset, explorer_horizon)
+    forecast_record = dict(current_plan_record or {})
+    if final_record:
+        forecast_record.update(final_record)
+    exact_estimates = resolve_horizon_estimates(
+        explorer_asset,
+        int(explorer_horizon),
+        research_snapshot=explorer_snapshot,
+        master_dataset=market_history,
+    )
+    forecast_record.update({key: value for key, value in exact_estimates.items() if value is not None})
+    forecast_record.update({"Asset": explorer_asset, "Horizon": int(explorer_horizon), "BestHorizon": int(explorer_horizon)})
+    if pd.notna(pd.to_numeric(forecast_record.get("PredictedMovePct"), errors="coerce")):
+        forecast_record = generate_cost_aware_asset_plan(
+            forecast_record,
+            amount=10000,
+            cost_assumptions=default_cost_assumptions(explorer_asset),
+        )
+        forecast_display = _annotate_snapshot_provenance(
+            pd.DataFrame([forecast_record]),
+            st.session_state.get("phase29_snapshot_source", "saved_artifact"),
+            st.session_state.get("phase29_user_report"),
+        ).iloc[0].to_dict()
+        render_prediction_snapshot_card(forecast_display)
+        render_cost_summary_card(forecast_display)
     else:
         latest_rows = _latest_user_price_snapshot()
-        latest_match = latest_rows[latest_rows["Asset"].astype(str).eq(explorer_asset)] if not latest_rows.empty else pd.DataFrame()
-        if not latest_match.empty:
+        latest_record = find_asset_horizon_record(
+            latest_rows.assign(Horizon=int(explorer_horizon)), explorer_asset, explorer_horizon
+        ) if not latest_rows.empty else None
+        if latest_record:
             render_metric_grid([{
-                "title": "Current price", "value": f"{float(latest_match.iloc[0].get('LatestPrice')):,.2f}",
-                "subtitle": f"Latest available dataset price · {latest_match.iloc[0].get('LatestPriceDate', '')}", "status": "info",
+                "title": "Latest saved price", "value": f"{float(latest_record.get('LatestPrice')):,.2f}",
+                "subtitle": f"Cached market snapshot · {latest_record.get('LatestPriceDate', '')}", "status": "info",
             }])
-        st.info("No matching saved predicted price is available for this asset and horizon. The app does not substitute another horizon or asset.")
+        st.info(
+            f"No saved research estimate is available for {explorer_asset} · {int(explorer_horizon)}D yet. "
+            "Refresh or rebuild research, or inspect source diagnostics. Another horizon is never substituted."
+        )
 
     forecast_mask = explorer_evidence.get("Metric", pd.Series(dtype=str)).astype(str).str.contains("forecast|predicted|probability", case=False, regex=True, na=False)
     forecast_table = explorer_evidence.loc[forecast_mask, ["Asset", "Horizon", "Metric", "Value", "Status", "Freshness"]].copy()
@@ -2995,16 +3754,11 @@ elif page == "Cost-Aware Plan":
 
     selected_plan = {}
     if not asset_plans.empty:
-        matches = asset_plans[
-            asset_plans["Asset"].astype(str).eq(cost_asset)
-            & pd.to_numeric(asset_plans["Horizon"], errors="coerce").eq(int(cost_horizon))
-        ]
-        if not matches.empty:
-            selected_plan = matches.iloc[0].to_dict()
+        selected_plan = find_asset_horizon_record(asset_plans, cost_asset, cost_horizon) or {}
     if isinstance(cost_snapshot, pd.DataFrame) and not cost_snapshot.empty:
-        snapshot_match = cost_snapshot[cost_snapshot["Asset"].astype(str).eq(cost_asset)]
-        if not snapshot_match.empty and int(snapshot_match.iloc[0].get("BestHorizon", 0) or 0) == int(cost_horizon):
-            selected_plan.update(snapshot_match.iloc[0].to_dict())
+        snapshot_record = find_asset_horizon_record(cost_snapshot, cost_asset, cost_horizon)
+        if snapshot_record:
+            selected_plan.update(snapshot_record)
     research_snapshot = st.session_state.get("phase26_research_snapshot")
     if not isinstance(research_snapshot, pd.DataFrame):
         research_snapshot = load_latest_research_snapshot()
@@ -3592,45 +4346,133 @@ elif page == "🤖 Train Models":
     st.markdown("---")
 
     st.markdown("Select which model families to train, then click **Start Training**.")
-    st.info(f"Training target asset: **{selected_asset}** (`{target_col}`)")
+    st.info(
+        f"Training target: **{selected_asset}**, **{int(selected_horizon)}D** research horizon "
+        f"(`{target_col}`). The legacy price model remains a chronological next-step model; "
+        "the selected horizon is retained as research context."
+    )
     col1, col2 = st.columns(2)
     with col1:
-        train_ml = st.checkbox("Train ML Models (Linear Regression, Trees, Boosting, SVR)", value=True)
+        train_ml = st.checkbox(
+            "Train ML Models (Linear Regression, Trees, Boosting, SVR)",
+            value=True,
+            key="advanced_training_ml_models",
+        )
     with col2:
-        train_dl = st.checkbox("Train DL Models (LSTM, BiLSTM, GRU, CNN-LSTM, Transformer)", value=False)
+        train_dl = st.checkbox(
+            "Train DL Models (LSTM, BiLSTM, GRU, CNN-LSTM, Transformer)",
+            value=False,
+            key="advanced_training_dl_models",
+        )
+        dl_epochs = int(st.session_state.get("advanced_training_dl_epochs", 10))
         if train_dl:
-            st.caption("⚠️ DL training is slower — consider reducing epochs below for a quick demo run.")
-            dl_epochs = st.slider("DL Epochs (demo)", 3, 100, 10)
+            st.caption("DL training is slower; reduce epochs below for a shorter research run.")
+            dl_epochs = st.slider(
+                "DL Epochs (demo)", 3, 100, dl_epochs, key="advanced_training_dl_epochs"
+            )
 
-    if st.button("🚀 Start Training", type="primary"):
-        progress = st.progress(0, text="Loading data...")
+    selected_families = [name for name, enabled in (("ML", train_ml), ("DL", train_dl)) if enabled]
+    start_training = st.button(
+        "Start Training",
+        type="primary",
+        key="advanced_start_training",
+        on_click=_preserve_training_diagnostic_state,
+        args=(selected_asset, int(selected_horizon)),
+    )
 
-        df_raw = load_raw_data("2015-01-01", use_cache=True)
-        progress.progress(20, text="Engineering features...")
-        df_features = build_features(df_raw, target_col=target_col)
-        progress.progress(40, text="Preprocessing...")
-        pp, data = get_preprocessor_and_data(df_features, target_col=target_col)
+    if start_training:
+        st.session_state.training_in_progress = True
+        st.session_state.last_training_result = None
+        st.session_state.last_training_error = None
+        st.session_state.last_training_error_details = None
+        st.session_state.last_training_error_kind = None
+        st.session_state.last_training_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.last_training_asset = selected_asset
+        st.session_state.last_training_horizon = int(selected_horizon)
+        st.session_state.last_training_model_families = selected_families
 
-        st.session_state.pp = pp
-        st.session_state.data = data
-        st.session_state.df_features = df_features
-        st.session_state.trained_asset = selected_asset
+        training_status = st.status("Training started", expanded=True)
+        progress = st.progress(0, text="Preparing training run...")
 
-        progress.progress(55, text="Training ML models...")
-        trainer = ModelTrainer(use_optuna=False, target_scaler=data.target_scaler, preprocessor=pp)
+        def _update_training_progress(value: int, message: str) -> None:
+            progress.progress(int(value), text=str(message))
+            training_status.write(str(message))
 
-        if train_ml:
-            trainer.train_all_ml(data)
+        try:
+            result = model_training_workflow.run_training_pipeline(
+                asset=selected_asset,
+                horizon=int(selected_horizon),
+                target_col=target_col,
+                train_ml=bool(train_ml),
+                train_dl=bool(train_dl),
+                dl_epochs=int(dl_epochs),
+                load_data=load_raw_data,
+                build_feature_frame=build_features,
+                prepare_data=get_preprocessor_and_data,
+                progress_callback=_update_training_progress,
+            )
+            st.session_state.pp = result.preprocessor
+            st.session_state.data = result.data
+            st.session_state.df_features = result.feature_frame
+            st.session_state.trained_asset = result.asset
+            st.session_state.trained_horizon = result.horizon
+            st.session_state.trainer = result.ml_trainer or result.dl_trainer
+            st.session_state.dl_trainer = result.dl_trainer
+            st.session_state.trained = True
+            st.session_state.last_training_result = {
+                "Status": "Complete",
+                "Asset": result.asset,
+                "Horizon": result.horizon,
+                "ModelFamilies": list(result.model_families),
+                "ModelCount": result.model_count,
+                "Leaderboard": result.leaderboard,
+                "ArtifactPaths": list(result.artifact_paths),
+                "CompletedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            progress.progress(100, text="Training complete.")
+            training_status.update(label="Training complete", state="complete", expanded=False)
+        except Exception as exc:
+            st.session_state.last_training_error = str(exc)
+            st.session_state.last_training_error_details = traceback.format_exc()
+            st.session_state.last_training_error_kind = (
+                "input_unavailable"
+                if isinstance(
+                    exc,
+                    (model_training_workflow.TrainingInputUnavailable, ModuleNotFoundError),
+                )
+                else "training_failed"
+            )
+            training_status.update(label="Training failed", state="error", expanded=True)
+        finally:
+            st.session_state.training_in_progress = False
 
-        progress.progress(85, text="Finalizing...")
-        st.session_state.trainer = trainer
-        st.session_state.trained = True
-        progress.progress(100, text="Done!")
-
-        st.success(f"✔ Training complete for {selected_asset} — {len(trainer.results)} model(s) trained.")
-        board = trainer.get_leaderboard("test")
-        st.dataframe(board, width="stretch")
-
+    last_training_result = st.session_state.get("last_training_result")
+    last_training_error = st.session_state.get("last_training_error")
+    if isinstance(last_training_result, dict):
+        families = ", ".join(last_training_result.get("ModelFamilies", [])) or "None"
+        st.success(
+            f"Training complete for {last_training_result.get('Asset')} at the retained "
+            f"{int(last_training_result.get('Horizon', selected_horizon))}D research horizon."
+        )
+        st.caption(
+            f"Status: {last_training_result.get('Status')} | Model families: {families} | "
+            f"Successful models: {int(last_training_result.get('ModelCount', 0))} | "
+            f"Completed: {last_training_result.get('CompletedAt')}"
+        )
+        board = last_training_result.get("Leaderboard")
+        if isinstance(board, pd.DataFrame) and not board.empty:
+            st.dataframe(board, width="stretch", hide_index=True)
+        artifact_paths = last_training_result.get("ArtifactPaths", [])
+        if artifact_paths:
+            st.caption("Generated artifacts: " + "; ".join(str(path) for path in artifact_paths))
+    elif last_training_error:
+        if st.session_state.get("last_training_error_kind") == "input_unavailable":
+            st.error("Training could not start because required input is unavailable.")
+            st.warning(last_training_error)
+        else:
+            st.error(f"Training failed for the selected configuration: {last_training_error}")
+        with st.expander("Training error details", expanded=False):
+            st.code(st.session_state.get("last_training_error_details") or str(last_training_error))
     elif st.session_state.trained:
         st.info("Models already trained this session. Go to **Compare Models** to view results, or retrain above.")
 

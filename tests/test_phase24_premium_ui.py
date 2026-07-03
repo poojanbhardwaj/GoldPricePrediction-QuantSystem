@@ -69,16 +69,18 @@ def test_phase24_removes_legacy_academic_and_single_asset_branding():
 
 def test_phase24_visible_navigation_uses_product_names_not_phase_numbers():
     app_source = _source("app.py")
-    navigation = app_source.split("NAVIGATION_GROUPS =", 1)[1].split("navigation_group =", 1)[0]
+    navigation = app_source.split("ADVANCED_DIAGNOSTIC_REGISTRY =", 1)[1].split(
+        "ADVANCED_INTERNAL_ROUTE", 1
+    )[0]
 
     for phase_number in ("Phase 19", "Phase 20", "Phase 21", "Phase 22", "Phase 23", "Phase 24"):
         assert phase_number not in navigation
     for label in (
-        "Guided Research Workflow",
-        "Signal Policy & Edge Repair Lab",
-        "Walk-Forward ML Replay",
-        "Unified Risk Command Center",
-        "Model Edge Benchmark Lab",
+        "Data Health",
+        "Forecasting & Models",
+        "Research Records",
+        "User Workspace",
+        "System",
     ):
         assert label in navigation
 

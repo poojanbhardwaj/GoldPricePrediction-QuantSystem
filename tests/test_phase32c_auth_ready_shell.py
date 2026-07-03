@@ -154,7 +154,8 @@ def test_create_account_and_login_sets_expected_session_keys(monkeypatch, tmp_pa
     assert stub.session_state["user_unlocked"] is True
     assert stub.session_state["demo_user_id"] is None
     assert stub.session_state["current_app_user_id"] == user.app_user_id
-    assert stub.session_state["primary_product_navigation"] == "User Goals & Saved Plans"
+    assert stub.session_state["_pending_product_navigation"] == "User Goals & Saved Plans"
+    assert "primary_product_navigation" not in stub.session_state
 
 
 def test_logout_returns_to_public_session(monkeypatch, tmp_path):
@@ -169,7 +170,8 @@ def test_logout_returns_to_public_session(monkeypatch, tmp_path):
     assert stub.session_state["user_unlocked"] is False
     assert stub.session_state["demo_user_id"] is None
     assert "current_app_user_id" not in stub.session_state
-    assert stub.session_state["primary_product_navigation"] == "Market Research Assistant"
+    assert stub.session_state["_pending_product_navigation"] == "Market Research Assistant"
+    assert "primary_product_navigation" not in stub.session_state
     assert auth_manager.get_current_auth_user(tmp_path / "app.db").is_authenticated is False
 
 

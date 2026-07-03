@@ -135,13 +135,13 @@ def test_public_source_labels_distinguish_saved_cached_and_refreshed_values():
     helpers = _helpers(_SessionState(), pd.DataFrame())
     labels = helpers["_phase29_public_source_labels"]
 
-    assert labels("saved_artifact") == ("Saved research snapshot", "Cached dataset price")
-    assert labels("last_good") == ("Saved research snapshot", "Cached dataset price")
-    assert labels("session", {"PriceDisplaySource": "Cached dataset price"}) == (
-        "Latest refreshed research", "Cached dataset price"
+    assert labels("saved_artifact") == ("Saved research snapshot", "Cached market snapshot")
+    assert labels("last_good") == ("Saved research snapshot", "Cached market snapshot")
+    assert labels("session", {"PriceDisplaySource": "Cached market snapshot"}) == (
+        "Latest refreshed research snapshot", "Cached market snapshot"
     )
-    assert labels("session", {"PriceDisplaySource": "Latest refreshed research"}) == (
-        "Latest refreshed research", "Latest refreshed research"
+    assert labels("session", {"PriceDisplaySource": "Latest refreshed research snapshot"}) == (
+        "Latest refreshed research snapshot", "Latest refreshed research snapshot"
     )
 
 
@@ -152,7 +152,7 @@ def test_market_assistant_warns_before_rendering_placeholder_and_has_diagnostics
     )[0]
 
     assert (
-        "Prediction snapshot unavailable. Showing current prices only. Refresh / rebuild the "
+        "Prediction snapshot unavailable. Showing cached market prices only. Refresh / rebuild the "
         in page_block
     )
     assert 'st.expander("Snapshot Source Diagnostics"' in page_block

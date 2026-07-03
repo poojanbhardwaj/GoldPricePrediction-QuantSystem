@@ -21,6 +21,7 @@ from src.app_context import (
     build_data_freshness_table,
     get_asset_target,
 )
+from src.research_record_lookup import normalize_asset_display_name, normalize_horizon_key
 from src.cost_aware_plan import (
     COST_DISCLAIMER,
     default_cost_assumptions,
@@ -205,6 +206,8 @@ def resolve_horizon_estimates(
     master_dataset: Any = None,
 ) -> Dict[str, Any]:
     """Resolve saved estimates for one exact asset/horizon without substituting another."""
+    asset = normalize_asset_display_name(asset)
+    horizon = normalize_horizon_key(horizon)
     research = (
         research_snapshot.copy()
         if isinstance(research_snapshot, pd.DataFrame)
@@ -443,7 +446,7 @@ def generate_dashboard_summary(asset_snapshots: Any) -> pd.DataFrame:
         "PassiveStrongerCount": int(gaps.lt(0).sum()),
         "HighRiskCount": int(frame.get("Status", pd.Series(dtype=str)).isin(["High Risk", "Avoid"]).sum()),
         "DataIssueCount": int(frame.get("Status", pd.Series(dtype=str)).eq("Data Issue").sum()),
-        "MainMessage": "Compare current prices, saved estimates, costs, passive references, and risk before starting any paper research plan.",
+        "MainMessage": "Compare latest source-labeled prices, saved estimates, costs, passive references, and risk before starting any paper research plan.",
         "RealMoneyApproved": False,
     }])
 

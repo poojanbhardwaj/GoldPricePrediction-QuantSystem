@@ -127,7 +127,7 @@ def _write_authenticated_session(
 
 def _set_post_login_page(user_id: int, db_path: str | Path) -> None:
     preferences = load_user_preferences(user_id, db_path=db_path) or {}
-    st.session_state.primary_product_navigation = str(
+    st.session_state["_pending_product_navigation"] = str(
         preferences.get("default_page") or "User Goals & Saved Plans"
     )
 
@@ -317,7 +317,7 @@ def logout_current_user() -> None:
         "current_user_created_at", "current_user_last_active_at",
     ):
         st.session_state.pop(key, None)
-    st.session_state.primary_product_navigation = "Market Research Assistant"
+    st.session_state["_pending_product_navigation"] = "Market Research Assistant"
 
 
 def sign_out() -> None:

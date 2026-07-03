@@ -151,7 +151,7 @@ def test_display_labels_and_output_schema_are_human_readable():
 def test_candidate_watchlist_is_a_first_class_primary_route():
     source = (ROOT / "app.py").read_text(encoding="utf-8")
     ast.parse(source)
-    navigation = source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
+    navigation = source.split("PAGE_REGISTRY = {", 1)[1].split("\n}\n\nPRIMARY_PAGE_ALIASES", 1)[0]
 
     assert navigation.index('"Research Dashboard"') < navigation.index('"Candidate Watchlist"')
     assert navigation.index('"Candidate Watchlist"') < navigation.index('"Asset Plans"')

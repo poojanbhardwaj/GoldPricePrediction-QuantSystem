@@ -21,9 +21,27 @@ _STATUS_STYLES = {
 }
 
 _DISPLAY_LABELS = {
-    "ExpectedDelay": "Recent data delay",
-    "MissingEstimate": "Estimate unavailable",
+    "OpportunityScore": "Opportunity score",
+    "ExpectedDelay": "Delayed",
+    "MissingEstimate": "Missing estimate",
     "Not Enough Evidence": "Insufficient evidence",
+    "NotEnoughEvidence": "Not enough evidence",
+    "CostManageable": "Costs manageable",
+    "CostsManageable": "Costs manageable",
+    "HighRisk": "High risk",
+    "LowRecheck": "Low recheck",
+    "DataIssue": "Data issue",
+    "InsufficientEvidence": "Insufficient evidence",
+    "CostsTooHighForSignal": "Costs too high for signal",
+}
+
+_BROKEN_WORDS = {
+    r"\bRe\s+view\b": "Review",
+    r"\btar\s+get\b": "target",
+    r"\bre\s+play\b": "replay",
+    r"\bestim\s+ate\b": "estimate",
+    r"\bOpp\s+ortunity\b": "Opportunity",
+    r"\bMiss\s+ing\b": "Missing",
 }
 
 
@@ -31,9 +49,25 @@ def _safe(value: Any) -> str:
     return escape(str(value if value is not None else ""))
 
 
+def humanize_label(value: Any) -> str:
+    """Translate internal labels and repair known display spacing."""
+    text = str(value if value is not None else "").strip()
+    if text in _DISPLAY_LABELS:
+        return _DISPLAY_LABELS[text]
+    for internal, display in _DISPLAY_LABELS.items():
+        text = re.sub(rf"\b{re.escape(internal)}\b", display, text)
+    for pattern, replacement in _BROKEN_WORDS.items():
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", text):
+        text = text.replace("_", " ")
+        text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+        text = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
+        text = text[:1].upper() + text[1:] if text else text
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _display_label(value: Any) -> str:
-    text = str(value if value is not None else "")
-    return _DISPLAY_LABELS.get(text, text)
+    return humanize_label(value)
 
 
 def _slug(value: Any) -> str:
@@ -413,8 +447,8 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
     status = str(row.get("Status", "Not Enough Evidence"))
     style = _STATUS_STYLES.get(status.casefold(), "neutral")
     priority = str(row.get("RecheckPriority", "Low"))
-    score = float(pd.to_numeric(pd.Series([row.get("OpportunityScore", 0)]), errors="coerce").fillna(0).iloc[0])
-    score = max(0.0, min(100.0, score))
+    score_value = pd.to_numeric(pd.Series([row.get("OpportunityScore")]), errors="coerce").iloc[0]
+    score = None if pd.isna(score_value) else max(0.0, min(100.0, float(score_value)))
     rank = row.get("ClosestToTrackRank", row.get("PlanRank", "-"))
     details = [
         ("Why", row.get("Why", "No explanation is available.")),
@@ -450,8 +484,8 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
         f'<div><span class="status-badge {style}">{_safe(_display_label(status))}</span> '
         f'<span class="confidence-badge">{_safe(row.get("Confidence", "Low"))} confidence</span> '
         f'<span class="priority-badge {_slug(priority)}">{_safe(priority)} recheck</span></div></div>'
-        f'<div class="opportunity-score"><span class="score">{score:.0f}</span><span class="track">'
-        f'<span class="fill" style="display:block;width:{score:.1f}%"></span></span>'
+        f'<div class="opportunity-score"><span class="score">{f"{score:.0f}" if score is not None else "Unavailable"}</span><span class="track">'
+        f'<span class="fill" style="display:block;width:{score if score is not None else 0:.1f}%"></span></span>'
         f'<span class="grade">Grade {_safe(row.get("OpportunityGrade", "-"))}</span></div>'
         f'{prediction_html}'
         f'<p class="summary">{_safe(row.get("Summary", "No summary is available."))}</p>'
@@ -464,10 +498,13 @@ def render_asset_plan_card(plan: Mapping[str, Any], *, show_advanced: bool = Fal
 
 def render_opportunity_card(plan: Mapping[str, Any]) -> None:
     row = dict(plan)
+    score = _fmt_number(
+        row.get("OpportunityScore"), digits=0, suffix="/100", missing="Score unavailable"
+    )
     st.markdown(
         f'<div class="opportunity-card"><h3>#{_safe(row.get("ClosestToTrackRank", row.get("PlanRank", "-")))} '
         f'{_safe(row.get("Asset", "Asset"))} · {_safe(row.get("Horizon", ""))}D</h3>'
-        f'<p>Opportunity score {_safe(row.get("OpportunityScore", 0))}/100 · {_safe(_display_label(row.get("Status", "")))} · '
+        f'<p>Opportunity score {_safe(score)} · {_safe(_display_label(row.get("Status", "")))} · '
         f'{_safe(row.get("PositiveEvidence", "No confirmed positive evidence yet."))}</p>'
         f'<p><strong>Blocking:</strong> {_safe(row.get("WhyNotTrackYet", row.get("MainRisk", "")))}</p>'
         f'<p><strong>Improve:</strong> {_safe(row.get("WhatMustImprove", row.get("ImprovementNeeded", "")))}</p>'
@@ -546,9 +583,12 @@ def render_asset_price_card(row: Mapping[str, Any]) -> None:
     st.markdown(
         f'<article class="asset-price-card"><div class="card-top"><span class="asset-name">{_safe(data.get("Asset", "Asset"))}</span>'
         f'<span class="status-badge {style}">{_safe(_display_label(status))}</span></div>'
-        f'<div class="latest-price">{price}</div><div class="as-of">{_safe(data.get("LatestPriceDate", "No date"))} · '
-        f'{_safe(_display_label(data.get("DataFreshness", "Unknown")))}</div>'
-        f'<div class="as-of">{_safe(research_source)} · {_safe(price_source)}</div>'
+        f'<div class="latest-price">{price}</div>'
+        f'<div class="as-of">Research source: {_safe(research_source)}</div>'
+        f'<div class="as-of">Price source: {_safe(price_source)}</div>'
+        f'<div class="as-of">{_safe(data.get("LatestSourceDateLabel", "Latest source date: Unknown"))}</div>'
+        f'<div class="as-of">{_safe(data.get("SnapshotAgeLabel", "Snapshot age: Unknown"))} · '
+        f'{_safe(data.get("FreshnessLabel", "Freshness: Unknown"))}</div>'
         f'<div class="number-strip"><div><span>1D change</span><strong>{_fmt_number(data.get("Change1D_pct"), suffix="%")}</strong></div>'
         f'<div><span>5D change</span><strong>{_fmt_number(data.get("Change5D_pct"), suffix="%")}</strong></div>'
         f'<div><span>30D change</span><strong>{_fmt_number(data.get("Change30D_pct"), suffix="%")}</strong></div></div>'
@@ -567,10 +607,13 @@ def render_prediction_snapshot_card(row: Mapping[str, Any]) -> None:
     price_source = data.get("PriceSourceLabel", "Price source unavailable")
     st.markdown(
         f'<div class="prediction-card"><h3>{_safe(data.get("Asset", "Asset"))} · {_safe(data.get("BestHorizon", ""))}D estimate</h3>'
-        f'<div class="number-strip"><div><span>Current</span><strong>{_fmt_number(data.get("LatestPrice"), missing="Price unavailable")}</strong></div>'
+        f'<div class="number-strip"><div><span>Latest saved price</span><strong>{_fmt_number(data.get("LatestPrice"), missing="Price unavailable")}</strong></div>'
         f'<div><span>Predicted</span><strong>{_fmt_number(data.get("PredictedPrice"), missing="Estimate unavailable")}</strong></div>'
         f'<div><span>Move</span><strong>{_fmt_number(data.get("PredictedMovePct"), suffix="%", missing="Estimate unavailable")}</strong></div></div>'
-        f'<p>{_safe(research_source)} · {_safe(price_source)} · as of {_safe(data.get("LatestPriceDate", "date unavailable"))}.</p>'
+        f'<p>Research source: {_safe(research_source)}. Price source: {_safe(price_source)}.</p>'
+        f'<p>{_safe(data.get("LatestSourceDateLabel", "Latest source date: Unknown"))}. '
+        f'{_safe(data.get("SnapshotAgeLabel", "Snapshot age: Unknown"))}. '
+        f'{_safe(data.get("FreshnessLabel", "Freshness: Unknown"))}.</p>'
         f'<p>Uncertainty: {_safe(data.get("PredictionUncertaintyLabel", "Unavailable"))}. Forecast evidence is one input and remains insufficient on its own.</p></div>',
         unsafe_allow_html=True,
     )
@@ -593,10 +636,10 @@ def render_score_explainer_card(row: Mapping[str, Any]) -> None:
     data = dict(row)
     st.markdown(
         f'<div class="score-explainer-card"><h3>Opportunity score: {_fmt_number(data.get("OpportunityScore"), digits=0, suffix="/100", missing="Score unavailable")}</h3>'
-        f'<p>{_safe(data.get("ScoreMeaning", "The score ranks research closeness, not expected profit."))}</p>'
-        f'<p><strong>Helped by:</strong> {_safe(data.get("ScorePositiveDrivers", "No strong positive driver is confirmed."))}</p>'
-        f'<p><strong>Reduced by:</strong> {_safe(data.get("ScoreReducedBy", "Weak evidence"))}</p>'
-        f'<p><strong>Can improve if:</strong> {_safe(data.get("ScoreCanImproveIf", data.get("WhatMustImprove", "More repeated evidence becomes available.")))}</p></div>',
+        f'<p>{_safe(humanize_label(data.get("ScoreMeaning", "The score ranks research closeness, not expected profit.")))}</p>'
+        f'<p><strong>Helped by:</strong> {_safe(humanize_label(data.get("ScorePositiveDrivers", "No strong positive driver is confirmed.")))}</p>'
+        f'<p><strong>Reduced by:</strong> {_safe(humanize_label(data.get("ScoreReducedBy", "Weak evidence")))}</p>'
+        f'<p><strong>Can improve if:</strong> {_safe(humanize_label(data.get("ScoreCanImproveIf", data.get("WhatMustImprove", "More repeated evidence becomes available."))))}</p></div>',
         unsafe_allow_html=True,
     )
 
@@ -635,7 +678,7 @@ def render_research_launch_panel(snapshot_source: str = "missing") -> None:
         )
     elif snapshot_source == "session":
         message = (
-            "Latest refreshed research is visible for this session. Source dates remain shown on "
+            "Latest refreshed research snapshot is visible for this session. Source dates remain shown on "
             "each card, and the values should not be interpreted as live quotes."
         )
     else:
@@ -781,5 +824,5 @@ __all__ = [
     "render_asset_price_card", "render_prediction_snapshot_card", "render_cost_summary_card",
     "render_score_explainer_card", "render_active_vs_passive_card", "render_simple_plan_card",
     "render_" + "r" + "un_research_panel", "render_market_snapshot_grid", "render_cost_assumption_inputs",
-    "render_beginner_explanation_box",
+    "render_beginner_explanation_box", "humanize_label",
 ]

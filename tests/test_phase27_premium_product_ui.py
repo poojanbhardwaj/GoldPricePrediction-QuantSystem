@@ -180,11 +180,12 @@ def test_phase27_quality_gates_are_complete_and_pass():
 
 def test_phase27_primary_navigation_is_product_named_and_advanced_remains():
     source = _source("app.py")
-    navigation = source.split("NAVIGATION_GROUPS =", 1)[1].split("navigation_group =", 1)[0]
+    navigation = source.split("ADVANCED_DIAGNOSTIC_REGISTRY =", 1)[1].split(
+        "ADVANCED_INTERNAL_ROUTE", 1
+    )[0]
     assert "Advanced Diagnostics" in source
     assert all(label in navigation for label in (
-        "Data & Features", "Forecasting & Models", "Signals & Plans", "Risk & Regime",
-        "Backtesting & Replay", "Evidence & Quality Gates",
+        "Data Health", "Forecasting & Models", "Research Records", "User Workspace", "System",
     ))
     for phase_number in ("Phase 23", "Phase 24", "Phase 25", "Phase 26", "Phase 27"):
         assert phase_number not in navigation
@@ -211,4 +212,3 @@ def test_phase27_public_outputs_have_no_forbidden_claims_or_real_money_approval(
 def test_phase27_python_files_compile_as_source():
     for path in ["app.py", "src/ui_components.py", "src/user_plan_generator.py", "tests/test_phase27_premium_product_ui.py"]:
         ast.parse(_source(path))
-

@@ -284,7 +284,7 @@ def test_evidence_page_is_after_candidate_watchlist_and_language_is_restrained()
     app_source = (ROOT / "app.py").read_text(encoding="utf-8")
     module_source = (ROOT / "src" / "evidence_of_edge.py").read_text(encoding="utf-8")
     ast.parse(app_source)
-    navigation = app_source.split("PRIMARY_PRODUCT_PAGES = [", 1)[1].split("]", 1)[0]
+    navigation = app_source.split("PAGE_REGISTRY = {", 1)[1].split("\n}\n\nPRIMARY_PAGE_ALIASES", 1)[0]
     page_block = app_source.split('elif page == "Evidence of Edge":', 1)[1].split(
         'elif page == "Paper Research Journey":', 1
     )[0]

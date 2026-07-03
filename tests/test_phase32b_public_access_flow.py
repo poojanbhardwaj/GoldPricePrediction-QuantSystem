@@ -85,16 +85,19 @@ def test_public_price_preview_has_date_and_honest_source_without_live_claim():
     app = _public_app()
     text = _all_visible_text(app)
     source_labels = {
-        "Cached dataset price",
+        "Cached market snapshot",
         "Saved research snapshot",
-        "Latest refreshed snapshot",
+        "Latest refreshed research snapshot",
     }
 
     assert any(label in text for label in source_labels)
     assert re.search(r"20\d{2}-\d{2}-\d{2}", text)
     assert "live price" not in text.casefold()
     assert "live quote" not in text.casefold()
-    assert any("Stale" in str(caption.value) for caption in app.caption)
+    assert any(
+        re.search(r"Freshness: (Recent|Delayed|Stale|Unknown)", str(caption.value))
+        for caption in app.caption
+    )
 
 
 def test_public_preview_has_login_and_methodology_actions_only():

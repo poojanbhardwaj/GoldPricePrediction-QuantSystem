@@ -6,6 +6,12 @@ from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
 
+from src.research_record_lookup import (
+    find_asset_horizon_records,
+    normalize_asset_display_name,
+    normalize_asset_key,
+)
+
 
 WATCHLIST_COLUMNS = [
     "Asset",
@@ -82,24 +88,21 @@ def _asset_order(frames: Iterable[pd.DataFrame]) -> list[str]:
     for frame in frames:
         if frame.empty or "Asset" not in frame.columns:
             continue
-        for asset in frame["Asset"].dropna().astype(str):
-            if asset and asset not in assets:
-                assets.append(asset)
+        for asset in frame["Asset"].dropna():
+            normalized = normalize_asset_display_name(asset)
+            if normalized and normalized != "ALL" and normalized not in assets:
+                assets.append(normalized)
     return assets
 
 
 def _best_asset_row(frame: pd.DataFrame, asset: str, horizon: Optional[int] = None) -> dict[str, Any]:
     if frame.empty or "Asset" not in frame.columns:
         return {}
-    rows = frame.loc[frame["Asset"].astype(str).eq(asset)].copy()
+    rows = frame.loc[frame["Asset"].map(normalize_asset_key).eq(normalize_asset_key(asset))].copy()
     if rows.empty:
         return {}
     if horizon is not None:
-        horizon_values = pd.to_numeric(
-            rows.get("BestHorizon", rows.get("Horizon", pd.Series(index=rows.index, dtype=float))),
-            errors="coerce",
-        )
-        exact = rows.loc[horizon_values.eq(int(horizon))]
+        exact = find_asset_horizon_records(rows, asset, horizon)
         if not exact.empty:
             rows = exact
     rows["_score"] = pd.to_numeric(

@@ -9,6 +9,11 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import pandas as pd
 
 from src.candidate_watchlist import format_watchlist_label
+from src.research_record_lookup import (
+    find_asset_horizon_records,
+    normalize_asset_display_name,
+    normalize_asset_key,
+)
 
 
 EDGE_EVIDENCE_COLUMNS = [
@@ -197,24 +202,21 @@ def _asset_order(frames: Iterable[pd.DataFrame]) -> list[str]:
     for frame in frames:
         if frame.empty or "Asset" not in frame.columns:
             continue
-        for asset in frame["Asset"].dropna().astype(str):
-            if asset and asset not in {"ALL", "All"} and asset not in assets:
-                assets.append(asset)
+        for asset in frame["Asset"].dropna():
+            normalized = normalize_asset_display_name(asset)
+            if normalized and normalized != "ALL" and normalized not in assets:
+                assets.append(normalized)
     return assets
 
 
 def _best_row(frame: pd.DataFrame, asset: str, horizon: Optional[int]) -> dict[str, Any]:
     if frame.empty or "Asset" not in frame.columns:
         return {}
-    rows = frame.loc[frame["Asset"].astype(str).eq(asset)].copy()
+    rows = frame.loc[frame["Asset"].map(normalize_asset_key).eq(normalize_asset_key(asset))].copy()
     if rows.empty:
         return {}
     if horizon is not None:
-        horizons = pd.to_numeric(
-            rows.get("BestHorizon", rows.get("Horizon", pd.Series(index=rows.index, dtype=float))),
-            errors="coerce",
-        )
-        exact = rows.loc[horizons.eq(int(horizon))]
+        exact = find_asset_horizon_records(rows, asset, horizon)
         if not exact.empty:
             rows = exact
     scores = pd.to_numeric(
@@ -239,7 +241,7 @@ def _best_validation_row(
     if validation_metrics.empty or "Asset" not in validation_metrics.columns:
         return {}
     rows = validation_metrics.loc[
-        validation_metrics["Asset"].astype(str).eq(asset)
+        validation_metrics["Asset"].map(normalize_asset_key).eq(normalize_asset_key(asset))
     ].copy()
     if rows.empty:
         return {}
@@ -285,7 +287,7 @@ def _long_metric_value(
 ) -> Optional[float]:
     if research.empty or not {"Metric", "Value"}.issubset(research.columns):
         return None
-    assets = research.get("Asset", pd.Series("ALL", index=research.index)).astype(str)
+    assets = research.get("Asset", pd.Series("ALL", index=research.index)).map(normalize_asset_key)
     horizons = pd.to_numeric(
         research.get("Horizon", pd.Series(0, index=research.index)), errors="coerce"
     ).fillna(0).astype(int)
@@ -297,8 +299,8 @@ def _long_metric_value(
         for exact_metric in (True, False):
             metric_mask = metrics.eq(normalized_alias) if exact_metric else metrics.str.endswith(normalized_alias)
             for asset_value, horizon_value in (
-                (asset, target_horizon), (asset, 0), ("ALL", target_horizon), ("ALL", 0),
-                ("All", target_horizon), ("All", 0),
+                (normalize_asset_key(asset), target_horizon), (normalize_asset_key(asset), 0),
+                ("ALL", target_horizon), ("ALL", 0),
             ):
                 matches = research.loc[
                     metric_mask & assets.eq(asset_value) & horizons.eq(horizon_value), "Value"

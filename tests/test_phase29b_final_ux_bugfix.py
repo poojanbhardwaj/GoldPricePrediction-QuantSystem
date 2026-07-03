@@ -189,8 +189,8 @@ def test_phase29_snapshot_reads_are_centralized_and_rerun_once_after_success():
 
 
 def test_internal_phase29_labels_are_formatted_for_display_only():
-    assert _display_label("ExpectedDelay") == "Recent data delay"
-    assert _display_label("MissingEstimate") == "Estimate unavailable"
+    assert _display_label("ExpectedDelay") == "Delayed"
+    assert _display_label("MissingEstimate") == "Missing estimate"
     assert _display_label("Not Enough Evidence") == "Insufficient evidence"
     assert _display_label("High Risk") == "High Risk"
 
