@@ -204,30 +204,14 @@ It does not:
 Predictions are uncertain research estimates. Market data can be delayed, incomplete, or unavailable. Any displayed result should be treated as paper-research evidence, not an investment instruction.
 
 ---
-
-## Roadmap
+## Future Work
 
 - Improve production persistence beyond local SQLite fallback.
 - Add deeper portfolio attribution and monitoring views.
 - Expand research-history comparison and change tracking.
-- Add non-execution research alerts.
-- Maintain updated screenshots and demo script as the product evolves.
 
 ---
 
-## Recruiter Demo Script
 
-A strong five-minute walkthrough:
-
-1. Open the public dashboard and explain the research-only purpose.
-2. Show the multi-asset dashboard and source/freshness labels.
-3. Refresh/rebuild research and explain snapshot provenance.
-4. Open Advanced Diagnostics and show model training.
-5. Show Compare Models and 30-Day Diagnostic Forecast.
-6. Open Candidate Watchlist and Evidence & Validation.
-7. Open Cost & Risk Plan and explain cost drag / break-even return.
-8. End with saved research plans/history and safety limitations.
-
----
 
 
