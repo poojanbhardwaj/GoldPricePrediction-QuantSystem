@@ -14,14 +14,13 @@ The project is designed as a portfolio-grade Streamlit application, not a notebo
 ---
 
 ## Live Demo
-
-[Live Streamlit App](https://multi-asset-quant-system.streamlit.app/#model-training-diagnostics)
+[Live Streamlit App](https://multi-asset-quant-system.streamlit.app/)
 
 ---
 
 ## Screenshots
 
-Screenshots from the deployed research workspace:S
+Screenshots from the deployed research workspace:
 
 | View | Screenshot |
 |---|---|
@@ -231,13 +230,4 @@ A strong five-minute walkthrough:
 
 ---
 
-## Project Positioning
 
-This is best described on a resume as:
-
-**Multi-Asset Quant Research Platform**  
-Python, Streamlit, Pandas, NumPy, scikit-learn, XGBoost, LightGBM, CatBoost, SQLite, pytest, Streamlit Cloud
-
-Suggested resume bullet:
-
-> Built a deployed multi-asset quant research platform for Gold, Silver, Crude Oil, Bitcoin, S&P 500, and GLD with market-data refresh, model training, diagnostics, evidence validation, candidate watchlists, and cost/risk planning.
