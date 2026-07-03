@@ -21,11 +21,15 @@ ENV/
 
 # Data / generated datasets
 data/raw/
-data/processed/
 data/interim/
 data/external/
 data/*.db
 data/*.db-*
+
+# Keep only reviewed demo dataset required by deployed app
+data/processed/*
+!data/processed/
+!data/processed/master_dataset.csv
 
 # Model artifacts / training outputs
 models/
