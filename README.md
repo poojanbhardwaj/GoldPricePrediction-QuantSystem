@@ -15,13 +15,13 @@ The project is designed as a portfolio-grade Streamlit application, not a notebo
 
 ## Live Demo
 
-[Live Streamlit App](PASTE_YOUR_STREAMLIT_APP_LINK_HERE)
+[Live Streamlit App](https://multi-asset-quant-system.streamlit.app/#model-training-diagnostics)
 
 ---
 
 ## Screenshots
 
-Save reviewed deployment screenshots in `docs/screenshots/` using the exact file names below.
+Screenshots from the deployed research workspace:S
 
 | View | Screenshot |
 |---|---|
