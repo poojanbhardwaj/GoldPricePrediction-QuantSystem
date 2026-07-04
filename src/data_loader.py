@@ -5,7 +5,7 @@ Downloads and merges all datasets required for gold price prediction:
   • Gold, Silver, Crude Oil, Bitcoin, DXY, S&P 500, VIX,
     Treasury 10Y, Gold ETF  ← via yfinance
   • Federal Funds Rate, CPI                               ← via FRED API
-  • Provides fallback synthetic data when APIs unavailable
+  • Uses real market data for product refresh; synthetic data is CI/offline opt-in only
 
 Classes
 -------
@@ -37,6 +37,16 @@ from src.utils import ensure_dir, retry, timer, summarize_dataframe
 
 logger = get_logger(__name__)
 cfg    = ConfigLoader()
+
+
+class MarketDataUnavailable(RuntimeError):
+    """Raised when required real market data is unavailable for product refresh."""
+
+
+def _env_truthy(name: str, default: str = "") -> bool:
+    value = str(os.getenv(name, default)).strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
 
 
 # ════════════════════════════════════════════════════════════════
@@ -127,6 +137,12 @@ class DataLoader:
         self.processed_dir = cfg.resolve_path("data_processed")
         self._master_cache = self.processed_dir / "master_dataset.csv"
 
+        # Synthetic data is useful for CI/offline tests, but it must never poison
+        # the deployed research dashboard. In product runs we prefer a stale real
+        # cache or a clear provider-unavailable warning over fake market prices.
+        self.allow_synthetic_fallback = self._synthetic_fallback_allowed()
+        self.source_status: Dict[str, str] = {}
+
     # ──────────────────────────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────────────────────────
@@ -175,29 +191,91 @@ class DataLoader:
     # ──────────────────────────────────────────────────────────────
 
     def download_yfinance(self) -> Dict[str, pd.DataFrame]:
-        """Download all yfinance tickers; return {name: DataFrame}."""
+        """Download all yfinance tickers; return {name: DataFrame}.
+
+        Product safety rule:
+        - Use real yfinance data when available.
+        - If a provider is rate-limited, try a cached real asset slice.
+        - Use synthetic data only when explicitly enabled for CI/offline demos.
+        """
         dfs: Dict[str, pd.DataFrame] = {}
 
         ticker_map = {
-            "gold":        ("GC=F",    "Gold"),
-            "silver":      ("SI=F",    "Silver"),
-            "crude_oil":   ("CL=F",    "Oil"),
-            "bitcoin":     ("BTC-USD", "BTC"),
-            "dxy":         ("DX-Y.NYB","DXY"),
-            "sp500":       ("^GSPC",   "SP500"),
-            "vix":         ("^VIX",    "VIX"),
-            "treasury_10y":("^TNX",    "TNX"),
-            "gold_etf":    ("GLD",     "GLD"),
+            # key          primary      prefix   alternate tickers          required
+            "gold":        ("GC=F",     "Gold",  ("XAUUSD=X",),             True),
+            "silver":      ("SI=F",     "Silver",("XAGUSD=X",),             True),
+            "crude_oil":   ("CL=F",     "Oil",   tuple(),                   True),
+            "bitcoin":     ("BTC-USD",  "BTC",   tuple(),                   True),
+            "dxy":         ("DX-Y.NYB", "DXY",   tuple(),                   False),
+            "sp500":       ("^GSPC",    "SP500", tuple(),                   True),
+            "vix":         ("^VIX",     "VIX",   tuple(),                   False),
+            "treasury_10y":("^TNX",     "TNX",   tuple(),                   False),
+            "gold_etf":    ("GLD",      "GLD",   tuple(),                   True),
         }
 
-        for key, (ticker, prefix) in ticker_map.items():
-            logger.info(f"Downloading {prefix} ({ticker}) ...")
-            df = _yf_download(ticker, self.start, self.end, prefix=prefix)
+        unavailable_required: list[str] = []
+
+        for key, (ticker, prefix, alternatives, required) in ticker_map.items():
+            tickers_to_try = (ticker, *tuple(alternatives))
+            df = None
+            used_ticker = None
+
+            for candidate in tickers_to_try:
+                logger.info(f"Downloading {prefix} ({candidate}) ...")
+                df = _yf_download(candidate, self.start, self.end, prefix=prefix)
+                if df is not None:
+                    used_ticker = candidate
+                    break
+
             if df is not None:
                 dfs[key] = df
-            else:
-                logger.warning(f"Using synthetic fallback for {prefix}")
+                self.source_status[prefix] = f"live:{used_ticker or ticker}"
+                continue
+
+            cached = self._cached_asset_from_master(prefix)
+            if cached is not None and not cached.empty:
+                logger.warning(
+                    "%s live data unavailable; using cached real %s data ending %s. "
+                    "No synthetic data will be used for this asset.",
+                    prefix,
+                    prefix,
+                    cached.index.max().date(),
+                )
+                dfs[key] = cached
+                self.source_status[prefix] = f"cached:{cached.index.max().date()}"
+                continue
+
+            if self.allow_synthetic_fallback:
+                logger.warning(
+                    "Synthetic fallback enabled by environment; using synthetic %s data. "
+                    "Do not use this mode for product research conclusions.",
+                    prefix,
+                )
                 dfs[key] = self._synthetic_fallback(prefix, self.start, self.end)
+                self.source_status[prefix] = "synthetic"
+                continue
+
+            message = (
+                f"{prefix} market data unavailable from yfinance and no cached real data exists. "
+                "Synthetic fallback is disabled for product refresh."
+            )
+            logger.error(message)
+            if required:
+                unavailable_required.append(prefix)
+            else:
+                self.source_status[prefix] = "missing"
+
+        if unavailable_required:
+            raise MarketDataUnavailable(
+                "Required market data unavailable: "
+                + ", ".join(unavailable_required)
+                + ". Try again later or use the last saved research snapshot."
+            )
+
+        if "gold" not in dfs:
+            raise MarketDataUnavailable(
+                "Gold market data is unavailable. Cannot build a trustworthy research dataset."
+            )
 
         return dfs
 
@@ -398,7 +476,7 @@ class DataLoader:
     ) -> pd.DataFrame:
         """
         Generate realistic synthetic OHLCV data using geometric Brownian motion.
-        Used when the live API is unavailable.
+        Used only when CI/offline synthetic fallback is explicitly enabled.
         """
         dates = pd.bdate_range(start=start, end=end)
         n = len(dates)
@@ -442,7 +520,7 @@ class DataLoader:
             index=dates,
         )
         df.index.name = "Date"
-        logger.info(f"Synthetic data generated for {prefix}: {df.shape}")
+        logger.warning(f"Synthetic data generated for {prefix}: {df.shape} — CI/offline fallback only")
         return df
 
     def _fred_fallback(self, col_name: str, start: str, end: str) -> pd.DataFrame:
