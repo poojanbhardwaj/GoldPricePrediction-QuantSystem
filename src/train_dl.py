@@ -29,7 +29,9 @@ Usage
     leaderboard = dl_trainer.get_leaderboard()
 """
 
+import os
 import time
+import traceback
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -46,6 +48,13 @@ from src.preprocessing import PreprocessedData
 
 logger = get_logger(__name__)
 cfg    = ConfigLoader()
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+
+class DLDependencyUnavailable(RuntimeError):
+    """Raised when TensorFlow/Keras is unavailable for DL training."""
+
 
 # Keras imports are deferred into functions where possible to keep module
 # import light for code paths that don't need TensorFlow (e.g. ML-only runs).
@@ -112,6 +121,7 @@ class DLModelTrainer:
         self.predict_returns = bool(getattr(preprocessor, "predict_returns", False))
 
         self.results: Dict[str, DLModelResult] = {}
+        self.failures: Dict[str, str] = {}
         self.checkpoints_dir = cfg.resolve_path("models_checkpoints")
         self.models_dir       = cfg.resolve_path("models_saved")
 
@@ -123,19 +133,57 @@ class DLModelTrainer:
 
     @timer
     def train_all_dl(self, data: PreprocessedData) -> Dict[str, DLModelResult]:
-        """Train all 5 DL models sequentially and store results internally."""
+        """Train all DL models and preserve per-model failure details."""
+        self.results = {}
+        self.failures = {}
+
         trainers = [
             ("LSTM",            self.train_lstm),
             ("BiLSTM",          self.train_bilstm),
-            ("GRU",              self.train_gru),
+            ("GRU",             self.train_gru),
             ("CNN-LSTM",        self.train_cnn_lstm),
             ("Transformer",     self.train_transformer),
         ]
+
+        try:
+            import tensorflow as tf
+            try:
+                # Keep Streamlit Cloud CPU training stable and predictable.
+                tf.config.threading.set_inter_op_parallelism_threads(1)
+                tf.config.threading.set_intra_op_parallelism_threads(1)
+            except RuntimeError:
+                # TensorFlow can reject thread changes after runtime init.
+                pass
+            except Exception:
+                pass
+        except Exception as exc:
+            message = (
+                "TensorFlow/Keras is required for DL training but could not be imported. "
+                "Install the deployment dependency `tensorflow-cpu>=2.16.1,<2.17` "
+                f"or review Python/package compatibility. Root error: {type(exc).__name__}: {exc}"
+            )
+            for name, _ in trainers:
+                self.failures[name] = message
+            logger.exception(message)
+            return self.results
+
+        try:
+            self._validate_training_input(data)
+        except Exception as exc:
+            message = f"DL training input is not usable: {type(exc).__name__}: {exc}"
+            for name, _ in trainers:
+                self.failures[name] = message
+            logger.exception(message)
+            return self.results
 
         for name, fn in trainers:
             try:
                 logger.info(f"{'─'*50}")
                 logger.info(f"Training: {name}")
+                try:
+                    tf.keras.backend.clear_session()
+                except Exception:
+                    pass
                 result = fn(data)
                 self.results[name] = result
                 logger.info(
@@ -145,11 +193,57 @@ class DLModelTrainer:
                     f"Train time={result.train_time_sec:.2f}s"
                 )
             except Exception as exc:
-                logger.error(f"Training failed for {name}: {exc}")
+                message = f"{type(exc).__name__}: {exc}"
+                self.failures[name] = message
+                logger.exception(f"Training failed for {name}: {message}")
 
         logger.info(f"{'─'*50}")
-        logger.info(f"All DL models trained: {len(self.results)}/{len(trainers)} succeeded")
+        logger.info(
+            f"All DL models trained: {len(self.results)}/{len(trainers)} succeeded"
+        )
+        if self.failures:
+            logger.warning(f"DL model failures: {self.failures}")
         return self.results
+
+    def _validate_training_input(self, data: PreprocessedData) -> None:
+        """Fail early with useful messages before Keras model construction."""
+        required = {
+            "X_train_seq": data.X_train_seq,
+            "y_train_seq": data.y_train_seq,
+            "X_val_seq": data.X_val_seq,
+            "y_val_seq": data.y_val_seq,
+            "X_test_seq": data.X_test_seq,
+            "y_test_seq": data.y_test_seq,
+        }
+        for name, value in required.items():
+            arr = np.asarray(value)
+            if arr.size == 0:
+                raise ValueError(f"{name} is empty; reduce sequence length or use more data.")
+
+        if np.asarray(data.X_train_seq).ndim != 3:
+            raise ValueError(
+                f"X_train_seq must be 3-D (samples, timesteps, features), got {np.asarray(data.X_train_seq).shape}."
+            )
+        if np.asarray(data.X_val_seq).ndim != 3 or np.asarray(data.X_test_seq).ndim != 3:
+            raise ValueError(
+                "Validation/test sequence arrays must be 3-D; preprocessing sequence creation failed."
+            )
+
+        for name, value in required.items():
+            arr = np.asarray(value, dtype=float)
+            if not np.isfinite(arr).all():
+                raise ValueError(f"{name} contains NaN or infinite values.")
+
+        if len(data.X_train_seq) < max(10, self.batch_size):
+            raise ValueError(
+                f"Not enough training sequences ({len(data.X_train_seq)}) for DL training."
+            )
+
+    def failure_report(self) -> str:
+        """Return a compact human-readable failure summary for the UI/workflow."""
+        if not self.failures:
+            return ""
+        return "; ".join(f"{name}: {message}" for name, message in self.failures.items())
 
     # ──────────────────────────────────────────────────────────────
     # Shared callbacks
@@ -160,7 +254,8 @@ class DLModelTrainer:
         from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
         safe_name = model_name.lower().replace(" ", "_").replace("-", "_")
-        ckpt_path = self.checkpoints_dir / f"{safe_name}_best.keras"
+        ckpt_dir = ensure_dir(self.checkpoints_dir)
+        ckpt_path = ckpt_dir / f"{safe_name}_best.keras"
 
         callbacks = [
             EarlyStopping(
