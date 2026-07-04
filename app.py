@@ -1177,7 +1177,6 @@ def _render_train_models_diagnostic(
             st.session_state.df_features = result.feature_frame
             st.session_state.trained_asset = result.asset
             st.session_state.trained_horizon = result.horizon
-            st.session_state.ml_trainer = result.ml_trainer
             st.session_state.trainer = result.ml_trainer or result.dl_trainer
             st.session_state.dl_trainer = result.dl_trainer
             st.session_state.trained = True
@@ -1244,7 +1243,7 @@ def _render_train_models_diagnostic(
 
 
 def _render_compare_models_diagnostic(selected_asset: str) -> None:
-    """Render combined ML/DL model comparison inside Advanced Diagnostics."""
+    """Render the existing model comparison inside Advanced Diagnostics."""
     st.markdown('<p class="main-header">Model Comparison</p>', unsafe_allow_html=True)
     st.markdown("---")
     if not st.session_state.trained:
@@ -1252,27 +1251,15 @@ def _render_compare_models_diagnostic(selected_asset: str) -> None:
         return
 
     _stop_if_asset_mismatch(selected_asset)
+    trainer = st.session_state.trainer
     viz = Visualizer()
     metric = st.selectbox(
         "Sort/compare by metric",
         ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"],
         key="advanced_compare_metric",
     )
-
-    records = _collect_session_model_records()
-    if not records:
-        st.warning("No trained model results are available in this session.")
-        return
-
-    board = _combined_session_leaderboard(metric)
-    if board.empty:
-        st.warning("No combined leaderboard is available.")
-        return
-
-    display_board = board.copy()
-    st.caption("Combined ML + DL leaderboard from the current training session.")
-    st.dataframe(display_board, width="stretch")
-
+    board = trainer.get_leaderboard("test")
+    st.dataframe(board, width="stretch")
     st.markdown("### Baseline Checks")
     data = st.session_state.data
     try:
@@ -1284,16 +1271,10 @@ def _render_compare_models_diagnostic(selected_asset: str) -> None:
         summary = model_vs_naive_summary(board, baseline_board)
         if summary:
             improvement = summary["rmse_improvement_pct"]
-            if improvement > 1.0:
+            if improvement > 0:
                 st.success(
                     f"Best model **{summary['best_model']}** beats Naive RMSE by **{improvement:.2f}%** "
                     f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
-                )
-            elif improvement > 0:
-                st.warning(
-                    f"Best model **{summary['best_model']}** only marginally beats Naive RMSE by "
-                    f"**{improvement:.2f}%** ({summary['best_model_rmse']} vs {summary['naive_rmse']}). "
-                    "Treat this as weak diagnostic evidence, not a strong forecasting edge."
                 )
             else:
                 st.error(
@@ -1303,20 +1284,13 @@ def _render_compare_models_diagnostic(selected_asset: str) -> None:
     except Exception as exc:
         st.warning(f"Could not calculate baseline checks: {exc}")
 
-    plot_board = board.copy()
-    if "ModelLabel" in plot_board.columns:
-        plot_board["Model"] = plot_board["ModelLabel"]
-    st.plotly_chart(viz.plot_model_comparison_plotly(plot_board, metric=metric), width="stretch")
-
-    best_record = records[0]
-    best_name = str(best_record["label"])
-    best_result = best_record["result"]
+    st.plotly_chart(viz.plot_model_comparison_plotly(board, metric=metric), width="stretch")
+    best_name, best_result = trainer.get_best_model("test")
     st.success(
-        f"Best current-session model: **{best_name}** | "
-        f"RMSE = {_result_metric(best_result, 'RMSE'):.2f}, "
-        f"R2 = {_result_metric(best_result, 'R2', default=np.nan):.4f}"
+        f"Best model: **{best_name}** | RMSE = {best_result.metrics_test['RMSE']:.2f}, "
+        f"R2 = {best_result.metrics_test['R2']:.4f}"
     )
-    st.markdown(f"### Actual vs Predicted - {selected_asset} ({best_name})")
+    st.markdown(f"### Actual vs Predicted - {selected_asset} (Best Model)")
     fig = viz.plot_actual_vs_predicted_plotly(
         data.prices_test,
         best_result.predictions_test,
@@ -1326,220 +1300,11 @@ def _render_compare_models_diagnostic(selected_asset: str) -> None:
     st.plotly_chart(fig, width="stretch")
 
 
-# DL_FORECAST_SEQUENCE_FIX_V1
-def _is_sequence_forecast_model(model_name: str, result: object) -> bool:
-    """Return True for trained DL models that require 3-D sequence input."""
-    dl_names = {"lstm", "bilstm", "gru", "cnn-lstm", "cnn_lstm", "transformer"}
-    name = str(model_name or "").strip().lower()
-
-    if name in dl_names:
-        return True
-
-    model = getattr(result, "model", None)
-    if model is not None:
-        input_shape = getattr(model, "input_shape", None)
-        if isinstance(input_shape, (tuple, list)) and len(input_shape) >= 3:
-            return True
-
-        module_name = str(getattr(model.__class__, "__module__", "")).lower()
-        class_name = str(getattr(model.__class__, "__name__", "")).lower()
-        if "keras" in module_name or "tensorflow" in module_name or "sequential" in class_name:
-            return name in dl_names
-
-    return False
-
-
-# SESSION_MODEL_COMPARISON_FIX_V1
-_AUTO_BEST_FORECAST_LABEL = "Auto Best Forecast (validated ensemble)"
-
-def _session_model_trainers() -> list[tuple[str, object]]:
-    """Return live ML/DL trainers without losing DL when both families were trained."""
-    trainers: list[tuple[str, object]] = []
-    seen: set[int] = set()
-
-    for family, key in (("ML", "ml_trainer"), ("DL", "dl_trainer")):
-        trainer = st.session_state.get(key)
-        if trainer is not None and hasattr(trainer, "results") and id(trainer) not in seen:
-            trainers.append((family, trainer))
-            seen.add(id(trainer))
-
-    primary = st.session_state.get("trainer")
-    if primary is not None and hasattr(primary, "results") and id(primary) not in seen:
-        names = {str(name).strip().lower() for name in getattr(primary, "results", {}).keys()}
-        dl_names = {"lstm", "bilstm", "gru", "cnn-lstm", "cnn_lstm", "transformer"}
-        family = "DL" if names and names.issubset(dl_names) else "ML"
-        trainers.append((family, primary))
-        seen.add(id(primary))
-
-    return trainers
-
-
-def _result_metric(result: object, metric: str, default: float = np.inf) -> float:
-    metrics = getattr(result, "metrics_test", {}) or {}
-    value = metrics.get(metric, default)
-    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    return float(numeric) if pd.notna(numeric) else float(default)
-
-
-def _collect_session_model_records() -> list[dict[str, object]]:
-    """Flatten live ML/DL trainer results into selectable model records."""
-    records: list[dict[str, object]] = []
-    for family, trainer in _session_model_trainers():
-        results = getattr(trainer, "results", {}) or {}
-        for model_name, result in results.items():
-            rmse = _result_metric(result, "RMSE")
-            label = f"{family} · {model_name}"
-            records.append({
-                "family": family,
-                "trainer": trainer,
-                "model_name": str(model_name),
-                "label": label,
-                "result": result,
-                "rmse": rmse,
-                "r2": _result_metric(result, "R2", default=np.nan),
-                "directional_accuracy": _result_metric(result, "DirectionalAccuracy", default=np.nan),
-            })
-    records.sort(key=lambda item: (float(item.get("rmse", np.inf)), str(item.get("label", ""))))
-    return records
-
-
-def _combined_session_leaderboard(metric: str = "RMSE") -> pd.DataFrame:
-    """Build a combined ML + DL leaderboard for charts and tables."""
-    boards: list[pd.DataFrame] = []
-    for family, trainer in _session_model_trainers():
-        try:
-            board = trainer.get_leaderboard("test")
-        except Exception:
-            board = pd.DataFrame()
-        if isinstance(board, pd.DataFrame) and not board.empty:
-            board = board.copy()
-            if "ModelFamily" not in board.columns:
-                board.insert(0, "ModelFamily", family)
-            else:
-                board["ModelFamily"] = board["ModelFamily"].fillna(family)
-            if "Model" in board.columns:
-                board["ModelLabel"] = board["ModelFamily"].astype(str) + " · " + board["Model"].astype(str)
-            boards.append(board)
-
-    if not boards:
-        return pd.DataFrame()
-
-    combined = pd.concat(boards, ignore_index=True)
-    sort_metric = metric if metric in combined.columns else "RMSE"
-    if sort_metric in combined.columns:
-        combined[sort_metric] = pd.to_numeric(combined[sort_metric], errors="coerce")
-        ascending = sort_metric not in {"R2", "DirectionalAccuracy"}
-        combined = combined.sort_values(sort_metric, ascending=ascending, na_position="last").reset_index(drop=True)
-    combined["Rank"] = np.arange(1, len(combined) + 1)
-    ordered = ["ModelFamily", "Rank", "Model", "ModelLabel"]
-    return combined[[c for c in ordered if c in combined.columns] + [c for c in combined.columns if c not in ordered]]
-
-
-def _forecast_single_session_model(
-    record: dict[str, object],
-    *,
-    pp: object,
-    data: object,
-    df_features: pd.DataFrame,
-    target_col: str,
-    n_days: int,
-) -> pd.DataFrame:
-    """Forecast one selected trained model using the full recompute path."""
-    model_name = str(record["model_name"])
-    result = record["result"]
-    predictor = Predictor(
-        model=getattr(result, "model"),
-        preprocessor=pp,
-        is_sequence_model=_is_sequence_forecast_model(model_name, result),
-    )
-
-    active_target_col = getattr(pp, "target_col", target_col)
-    ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
-    fe = FeatureEngineer(target_col=active_target_col)
-    forecast_df = predictor.forecast(
-        df_features,
-        feature_cols=data.feature_cols,
-        n_days=int(n_days),
-        indicators_engine=ti,
-        feature_engineer=fe,
-    )
-    return forecast_df
-
-
-def _auto_best_forecast(
-    *,
-    records: list[dict[str, object]],
-    pp: object,
-    data: object,
-    df_features: pd.DataFrame,
-    target_col: str,
-    n_days: int,
-    max_models: int = 5,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Generate a robust forecast by taking the median path of the best validated models."""
-    usable_records = [
-        item for item in records
-        if np.isfinite(float(item.get("rmse", np.inf)))
-    ][:max_models]
-
-    forecast_paths: list[pd.Series] = []
-    used_rows: list[dict[str, object]] = []
-    errors: list[str] = []
-
-    for record in usable_records:
-        try:
-            one = _forecast_single_session_model(
-                record,
-                pp=pp,
-                data=data,
-                df_features=df_features,
-                target_col=target_col,
-                n_days=n_days,
-            )
-            if isinstance(one, pd.DataFrame) and "Predicted_Price" in one.columns and not one.empty:
-                forecast_paths.append(one["Predicted_Price"].rename(str(record["label"])))
-                used_rows.append({
-                    "Family": record["family"],
-                    "Model": record["model_name"],
-                    "RMSE": record["rmse"],
-                    "R2": record.get("r2", np.nan),
-                    "DirectionalAccuracy": record.get("directional_accuracy", np.nan),
-                })
-        except Exception as exc:
-            errors.append(f"{record.get('label')}: {exc}")
-
-    if not forecast_paths:
-        detail = "; ".join(errors[:5]) if errors else "No trained model produced a usable forecast path."
-        raise RuntimeError(f"Auto best forecast could not generate a usable path. {detail}")
-
-    path_frame = pd.concat(forecast_paths, axis=1)
-    forecast_df = pd.DataFrame(index=path_frame.index)
-    forecast_df["Predicted_Price"] = path_frame.median(axis=1)
-    used = pd.DataFrame(used_rows)
-    return forecast_df, used
-
-
-def _forecast_stability_message(forecast_df: pd.DataFrame, last_price: float) -> str:
-    """Return a plain-language note about forecast movement."""
-    if not isinstance(forecast_df, pd.DataFrame) or forecast_df.empty or "Predicted_Price" not in forecast_df.columns:
-        return ""
-    first = pd.to_numeric(pd.Series([forecast_df["Predicted_Price"].iloc[0]]), errors="coerce").iloc[0]
-    last = pd.to_numeric(pd.Series([forecast_df["Predicted_Price"].iloc[-1]]), errors="coerce").iloc[0]
-    if pd.isna(first) or pd.isna(last) or not last_price:
-        return ""
-    total_move = (float(last) / float(last_price) - 1.0) * 100.0
-    if abs(total_move) < 1.0:
-        return (
-            "The selected validated models are producing a low-conviction/near-flat path. "
-            "That usually means the model is not seeing enough evidence for a large move, not that the chart is broken."
-        )
-    return f"Forecast path total move from the latest known price: {total_move:+.2f}%."
-
 def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) -> None:
-    """Render session forecast using all trained ML/DL models."""
+    """Render the existing recursive forecast as a clearly labeled diagnostic."""
     st.warning(
-        "Diagnostic recursive forecast: this view chains model outputs forward and can be conservative. "
-        "Use it to compare trained model behavior, not as financial advice or an execution instruction."
+        "Legacy diagnostic view - recursive price chaining is not the primary forecasting evidence. "
+        "Use validated direct-horizon and walk-forward results for research conclusions."
     )
     st.markdown('<p class="main-header">30-Day Price Forecast</p>', unsafe_allow_html=True)
     st.markdown("---")
@@ -1548,26 +1313,14 @@ def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) ->
         return
 
     _stop_if_asset_mismatch(selected_asset)
+    trainer = st.session_state.trainer
     pp = st.session_state.pp
     data = st.session_state.data
     df_features = st.session_state.df_features
-    active_target_col = getattr(pp, "target_col", target_col)
-    records = _collect_session_model_records()
-
-    if not records:
-        st.warning("No trained ML/DL models are available in this session. Train models first.")
-        return
-
-    option_labels = [_AUTO_BEST_FORECAST_LABEL] + [str(record["label"]) for record in records]
-    model_choice = st.selectbox(
+    model_name = st.selectbox(
         "Select a model for forecasting",
-        option_labels,
-        index=0,
+        list(trainer.results.keys()),
         key="advanced_forecast_model",
-        help=(
-            "Auto Best uses the median path of the best current-session models ranked by validation RMSE. "
-            "Manual choices are diagnostic single-model forecasts."
-        ),
     )
     n_days = st.slider(
         "Forecast horizon (days)", 5, 60, 30, key="advanced_forecast_days"
@@ -1575,40 +1328,20 @@ def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) ->
     if not st.button("Generate Forecast", type="primary", key="advanced_generate_forecast"):
         return
 
-    used_models = pd.DataFrame()
-    forecast_source_label = str(model_choice)
-
     with st.spinner(f"Generating {n_days}-day forecast..."):
+        result = trainer.results[model_name]
+        predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
+        active_target_col = getattr(pp, "target_col", target_col)
+        ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
+        fe = FeatureEngineer(target_col=active_target_col)
         try:
-            if model_choice == _AUTO_BEST_FORECAST_LABEL:
-                forecast_df, used_models = _auto_best_forecast(
-                    records=records,
-                    pp=pp,
-                    data=data,
-                    df_features=df_features,
-                    target_col=active_target_col,
-                    n_days=n_days,
-                )
-                forecast_source_label = "Auto Best validated ensemble"
-            else:
-                selected_record = next(
-                    record for record in records if str(record["label"]) == str(model_choice)
-                )
-                forecast_df = _forecast_single_session_model(
-                    selected_record,
-                    pp=pp,
-                    data=data,
-                    df_features=df_features,
-                    target_col=active_target_col,
-                    n_days=n_days,
-                )
-                used_models = pd.DataFrame([{
-                    "Family": selected_record["family"],
-                    "Model": selected_record["model_name"],
-                    "RMSE": selected_record["rmse"],
-                    "R2": selected_record.get("r2", np.nan),
-                    "DirectionalAccuracy": selected_record.get("directional_accuracy", np.nan),
-                }])
+            forecast_df = predictor.forecast(
+                df_features,
+                feature_cols=data.feature_cols,
+                n_days=n_days,
+                indicators_engine=ti,
+                feature_engineer=fe,
+            )
         except ValueError as exc:
             st.error(str(exc))
             st.info(
@@ -1616,27 +1349,12 @@ def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) ->
                 "asset model so its saved feature contract matches the current pipeline."
             )
             return
-        except Exception as exc:
-            st.error(f"Forecast generation failed: {exc}")
-            return
-
         volatility = df_features["Daily_Return"].std()
-        forecast_df = Predictor(
-            model=records[0]["result"].model,
-            preprocessor=pp,
-            is_sequence_model=_is_sequence_forecast_model(records[0]["model_name"], records[0]["result"]),
-        ).add_confidence_bands(forecast_df, historical_volatility=volatility)
+        forecast_df = predictor.add_confidence_bands(
+            forecast_df, historical_volatility=volatility
+        )
 
-    last_price = pd.to_numeric(pd.Series([df_features[active_target_col].iloc[-1]]), errors="coerce").iloc[0]
-    st.success(f"{n_days}-day {selected_asset} forecast generated using {forecast_source_label}")
-    note = _forecast_stability_message(forecast_df, float(last_price) if pd.notna(last_price) else 0.0)
-    if note:
-        st.info(note)
-
-    if isinstance(used_models, pd.DataFrame) and not used_models.empty:
-        with st.expander("Models used for this forecast", expanded=False):
-            st.dataframe(used_models, width="stretch", hide_index=True)
-
+    st.success(f"{n_days}-day {selected_asset} forecast generated using {model_name}")
     viz = Visualizer()
     figure = viz.plot_forecast_plotly(
         forecast_df,
@@ -1653,7 +1371,7 @@ def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) ->
         data=forecast_df.to_csv().encode("utf-8"),
         file_name=(
             f"{_safe_filename_part(selected_asset)}_"
-            f"{_safe_filename_part(forecast_source_label)}_{n_days}day_forecast.csv"
+            f"{_safe_filename_part(model_name)}_{n_days}day_forecast.csv"
         ),
         mime="text/csv",
     )
@@ -4994,12 +4712,7 @@ elif page == "🔮 Prediction":
         model_name = st.selectbox("Select a model", list(trainer.results.keys()))
         result = trainer.results[model_name]
 
-        is_sequence_model = _is_sequence_forecast_model(model_name, result)
-        predictor = Predictor(
-            model=result.model,
-            preprocessor=pp,
-            is_sequence_model=is_sequence_model,
-        )
+        predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
 
         # Use the latest available feature row for the live next-day forecast.
         # After the next-day target fix, data.X_test[-1] is the last row with a
@@ -11854,8 +11567,8 @@ elif page == "📡 Signal Engine":
 
 elif page == "📅 30-Day Forecast":
     st.warning(
-        "Diagnostic recursive forecast: this view chains model outputs forward and can be conservative. "
-        "Use it to compare trained model behavior, not as financial advice or an execution instruction."
+        "Legacy diagnostic view - recursive price chaining is not the primary forecasting evidence. "
+        "Use Direct Horizon Scanner, Walk-Forward ML Replay, and Model Edge Benchmark Lab for multi-asset validation."
     )
     st.markdown('<p class="main-header">📅 30-Day Price Forecast</p>', unsafe_allow_html=True)
     st.markdown("---")
@@ -11864,54 +11577,28 @@ elif page == "📅 30-Day Forecast":
         st.warning("⚠️ No models trained yet. Go to **Train Models** first.")
     else:
         _stop_if_asset_mismatch(selected_asset)
+        trainer = st.session_state.trainer
         pp = st.session_state.pp
         data = st.session_state.data
         df_features = st.session_state.df_features
-        active_target_col = getattr(pp, "target_col", target_col)
-        records = _collect_session_model_records()
 
-        if not records:
-            st.warning("No trained ML/DL models are available in this session. Train models first.")
-            st.stop()
-
-        option_labels = [_AUTO_BEST_FORECAST_LABEL] + [str(record["label"]) for record in records]
-        model_choice = st.selectbox("Select a model for forecasting", option_labels, index=0)
+        model_name = st.selectbox("Select a model for forecasting", list(trainer.results.keys()))
         n_days = st.slider("Forecast horizon (days)", 5, 60, 30)
 
         if st.button("🔮 Generate Forecast", type="primary"):
-            used_models = pd.DataFrame()
-            forecast_source_label = str(model_choice)
             with st.spinner(f"Generating {n_days}-day forecast..."):
+                result = trainer.results[model_name]
+                predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
+
+                active_target_col = getattr(pp, "target_col", target_col)
+                ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
+                fe = FeatureEngineer(target_col=active_target_col)
+
                 try:
-                    if model_choice == _AUTO_BEST_FORECAST_LABEL:
-                        forecast_df, used_models = _auto_best_forecast(
-                            records=records,
-                            pp=pp,
-                            data=data,
-                            df_features=df_features,
-                            target_col=active_target_col,
-                            n_days=n_days,
-                        )
-                        forecast_source_label = "Auto Best validated ensemble"
-                    else:
-                        selected_record = next(
-                            record for record in records if str(record["label"]) == str(model_choice)
-                        )
-                        forecast_df = _forecast_single_session_model(
-                            selected_record,
-                            pp=pp,
-                            data=data,
-                            df_features=df_features,
-                            target_col=active_target_col,
-                            n_days=n_days,
-                        )
-                        used_models = pd.DataFrame([{
-                            "Family": selected_record["family"],
-                            "Model": selected_record["model_name"],
-                            "RMSE": selected_record["rmse"],
-                            "R2": selected_record.get("r2", np.nan),
-                            "DirectionalAccuracy": selected_record.get("directional_accuracy", np.nan),
-                        }])
+                    forecast_df = predictor.forecast(
+                        df_features, feature_cols=data.feature_cols, n_days=n_days,
+                        indicators_engine=ti, feature_engineer=fe,
+                    )
                 except ValueError as exc:
                     st.error(str(exc))
                     st.info(
@@ -11919,25 +11606,10 @@ elif page == "📅 30-Day Forecast":
                         "asset model so its saved feature contract matches the current pipeline."
                     )
                     st.stop()
-                except Exception as exc:
-                    st.error(f"Forecast generation failed: {exc}")
-                    st.stop()
-
                 vol = df_features["Daily_Return"].std()
-                forecast_df = Predictor(
-                    model=records[0]["result"].model,
-                    preprocessor=pp,
-                    is_sequence_model=_is_sequence_forecast_model(records[0]["model_name"], records[0]["result"]),
-                ).add_confidence_bands(forecast_df, historical_volatility=vol)
+                forecast_df = predictor.add_confidence_bands(forecast_df, historical_volatility=vol)
 
-            st.success(f"✔ {n_days}-day {selected_asset} forecast generated using {forecast_source_label}")
-            last_price = pd.to_numeric(pd.Series([df_features[active_target_col].iloc[-1]]), errors="coerce").iloc[0]
-            note = _forecast_stability_message(forecast_df, float(last_price) if pd.notna(last_price) else 0.0)
-            if note:
-                st.info(note)
-            if isinstance(used_models, pd.DataFrame) and not used_models.empty:
-                with st.expander("Models used for this forecast", expanded=False):
-                    st.dataframe(used_models, width="stretch", hide_index=True)
+            st.success(f"✔ {n_days}-day {selected_asset} forecast generated using {model_name}")
 
             viz = Visualizer()
             fig = viz.plot_forecast_plotly(
@@ -11956,6 +11628,6 @@ elif page == "📅 30-Day Forecast":
             st.download_button(
                 "📥 Download Forecast (CSV)",
                 data=csv,
-                file_name=f"{_safe_filename_part(selected_asset)}_{_safe_filename_part(forecast_source_label)}_{n_days}day_forecast.csv",
+                file_name=f"{_safe_filename_part(selected_asset)}_{_safe_filename_part(model_name)}_{n_days}day_forecast.csv",
                 mime="text/csv",
             )

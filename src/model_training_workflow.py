@@ -33,20 +33,11 @@ class TrainingWorkflowResult:
     data: Optional[Any] = None
     feature_frame: pd.DataFrame = field(default_factory=pd.DataFrame)
     artifact_paths: tuple[str, ...] = ()
-    training_warnings: tuple[str, ...] = ()
 
 
 def _notify(callback: Optional[ProgressCallback], value: int, message: str) -> None:
     if callback is not None:
         callback(int(value), str(message))
-
-
-def _format_dl_failures(failures: Any) -> str:
-    """Return compact DL failure details without exposing full traceback noise."""
-    if not isinstance(failures, dict) or not failures:
-        return ""
-    parts = [f"{name}: {message}" for name, message in failures.items()]
-    return " Details: " + " | ".join(parts[:5])
 
 
 def run_training_pipeline(
@@ -88,7 +79,6 @@ def run_training_pipeline(
     ml_trainer = None
     dl_trainer = None
     model_count = 0
-    workflow_warnings: list[str] = []
 
     if train_ml:
         model_families.append("ML")
@@ -109,49 +99,20 @@ def run_training_pipeline(
     if train_dl:
         model_families.append("DL")
         _notify(progress_callback, 72, "Training deep-learning models...")
-        try:
-            from src.train_dl import DLModelTrainer
-        except Exception as exc:
-            message = (
-                "Deep-learning trainer could not be imported. "
-                "Install TensorFlow CPU support and verify dependencies. "
-                f"Root error: {type(exc).__name__}: {exc}"
-            )
-            if model_count > 0:
-                workflow_warnings.append(message)
-            else:
-                raise RuntimeError(message) from exc
-        else:
-            dl_trainer = DLModelTrainer(
-                preprocessor=preprocessor,
-                epochs=int(dl_epochs),
-                verbose=0,
-            )
-            dl_trainer.train_all_dl(data)
+        from src.train_dl import DLModelTrainer
 
-            dl_success_count = len(getattr(dl_trainer, "results", {}))
-            dl_failures = getattr(dl_trainer, "failures", {})
-            if dl_success_count == 0:
-                message = (
-                    "Deep-learning training finished without a successful model."
-                    + _format_dl_failures(dl_failures)
-                )
-                if model_count > 0:
-                    workflow_warnings.append(message)
-                else:
-                    raise RuntimeError(message)
-            else:
-                model_count += dl_success_count
-                dl_board = dl_trainer.get_leaderboard("test")
-                if isinstance(dl_board, pd.DataFrame) and not dl_board.empty:
-                    dl_board = dl_board.copy()
-                    dl_board.insert(0, "ModelFamily", "DL")
-                    leaderboards.append(dl_board)
-                if dl_failures:
-                    workflow_warnings.append(
-                        "Some DL models failed while others succeeded."
-                        + _format_dl_failures(dl_failures)
-                    )
+        dl_trainer = DLModelTrainer(
+            preprocessor=preprocessor,
+            epochs=int(dl_epochs),
+            verbose=0,
+        )
+        dl_trainer.train_all_dl(data)
+        model_count += len(dl_trainer.results)
+        dl_board = dl_trainer.get_leaderboard("test")
+        if isinstance(dl_board, pd.DataFrame) and not dl_board.empty:
+            dl_board = dl_board.copy()
+            dl_board.insert(0, "ModelFamily", "DL")
+            leaderboards.append(dl_board)
 
     if model_count == 0:
         raise RuntimeError(
@@ -172,5 +133,4 @@ def run_training_pipeline(
         preprocessor=preprocessor,
         data=data,
         feature_frame=feature_frame,
-        training_warnings=tuple(workflow_warnings),
     )
