@@ -54,15 +54,10 @@ Screenshots from the deployed research workspace:
 | View | Screenshot |
 |---|---|
 | Research Dashboard | ![Research Dashboard](docs/screenshots/01_dashboard.png) |
-| Refresh / Rebuild Research | ![Refresh Research](docs/screenshots/02_refresh_research.png) |
+| Refresh / Rebuild Research | ![Refresh / Rebuild Research](docs/screenshots/02_refresh_research.png) |
 | Advanced Diagnostics | ![Advanced Diagnostics](docs/screenshots/03_advanced_diagnostics.png) |
 | Train Models | ![Train Models](docs/screenshots/04_train_models.png) |
 | Compare Models | ![Compare Models](docs/screenshots/05_compare_models.png) |
-| Actual vs Predicted | ![Actual vs Predicted](docs/screenshots/06_actual_vs_predicted.png) |
-| 30-Day Diagnostic Forecast | ![30-Day Forecast](docs/screenshots/07_30_day_forecast.png) |
-| Cost & Risk Plan | ![Cost & Risk Plan](docs/screenshots/08_cost_risk_plan.png) |
-| Candidate Watchlist | ![Candidate Watchlist](docs/screenshots/09_candidate_watchlist.png) |
-| Evidence & Validation | ![Evidence & Validation](docs/screenshots/10_evidence_validation.png) |
 
 ---
 
