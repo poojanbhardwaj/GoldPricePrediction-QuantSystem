@@ -495,6 +495,29 @@ def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
 
     return False
 
+
+# DEPLOY_SAFE_PHASE29_IMMUTABLE_PREDICTION_FALLBACK_V1
+_raw_load_phase29_table = _load_phase29_table
+
+def _load_phase29_table(filename: str) -> pd.DataFrame:
+    """Load Phase 29 table, falling back to a protected prediction snapshot when needed.
+
+    This prevents Refresh/Rebuild from leaving the public dashboard in a price-only
+    'Estimate unavailable' state when a valid saved prediction artifact exists.
+    """
+    table = _raw_load_phase29_table(filename)
+
+    if filename == "phase29_all_asset_prediction_snapshot.csv":
+        if _has_real_phase29_predictions(table):
+            return table
+
+        fallback = _raw_load_phase29_table("phase29_all_asset_prediction_snapshot_fallback.csv")
+        if _has_real_phase29_predictions(fallback):
+            return fallback
+
+    return table
+
+
 def _safe_phase29_warning(value: object) -> str:
     """Redact common credential forms before a run warning reaches diagnostics."""
     text = str(value or "")
