@@ -1357,7 +1357,13 @@ def _render_train_models_diagnostic(
             f"Warnings: {int(last_training_result.get('WarningCount', 0))} | "
             f"Completed: {last_training_result.get('CompletedAt')}"
         )
-        board = last_training_result.get("RegistryLeaderboard") or last_training_result.get("Leaderboard")
+        board = last_training_result.get("RegistryLeaderboard")
+        if not isinstance(board, pd.DataFrame) or board.empty:
+            board = last_training_result.get("Leaderboard")
+        if board is None:
+            board = pd.DataFrame()
+        elif not isinstance(board, pd.DataFrame):
+            board = pd.DataFrame(board)
         if isinstance(board, pd.DataFrame) and not board.empty:
             st.dataframe(board, width="stretch", hide_index=True)
         artifact_paths = last_training_result.get("ArtifactPaths", [])
