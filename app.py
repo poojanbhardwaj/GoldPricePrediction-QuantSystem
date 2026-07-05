@@ -27,6 +27,13 @@ from src.feature_intelligence import (
 )
 from src.preprocessing import Preprocessor
 from src import model_training_workflow
+from src.trained_model_registry import (
+    get_entry_by_display_name,
+    get_forecast_ready_models,
+    get_trained_model_registry,
+    registry_to_leaderboard,
+    set_trained_model_registry,
+)
 from src.predict import Predictor
 from src.visualization import Visualizer
 from src.prediction_ranges import calculate_prediction_range
@@ -1298,18 +1305,22 @@ def _render_train_models_diagnostic(
             st.session_state.df_features = result.feature_frame
             st.session_state.trained_asset = result.asset
             st.session_state.trained_horizon = result.horizon
+            set_trained_model_registry(st.session_state, result.model_registry)
+            forecast_ready_models = get_forecast_ready_models(result.model_registry, asset=result.asset)
             st.session_state.trainer = result.ml_trainer or result.dl_trainer
             st.session_state.dl_trainer = result.dl_trainer
-            st.session_state.trained = True
+            st.session_state.trained = bool(forecast_ready_models)
             st.session_state.phase29_training_completed = True
             st.session_state.phase29_training_result_ready = True
             st.session_state.last_training_result = {
-                "Status": "Complete",
+                "Status": "Complete" if forecast_ready_models else "Completed with warnings",
                 "Asset": result.asset,
                 "Horizon": result.horizon,
                 "ModelFamilies": list(result.model_families),
                 "ModelCount": result.model_count,
+                "WarningCount": result.warning_count,
                 "Leaderboard": result.leaderboard,
+                "RegistryLeaderboard": registry_to_leaderboard(result.model_registry, asset=result.asset, include_unusable=True),
                 "ArtifactPaths": list(result.artifact_paths),
                 "CompletedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -1343,9 +1354,10 @@ def _render_train_models_diagnostic(
         st.caption(
             f"Status: {last_training_result.get('Status')} | Model families: {families} | "
             f"Successful models: {int(last_training_result.get('ModelCount', 0))} | "
+            f"Warnings: {int(last_training_result.get('WarningCount', 0))} | "
             f"Completed: {last_training_result.get('CompletedAt')}"
         )
-        board = last_training_result.get("Leaderboard")
+        board = last_training_result.get("RegistryLeaderboard") or last_training_result.get("Leaderboard")
         if isinstance(board, pd.DataFrame) and not board.empty:
             st.dataframe(board, width="stretch", hide_index=True)
         artifact_paths = last_training_result.get("ArtifactPaths", [])
@@ -1364,138 +1376,21 @@ def _render_train_models_diagnostic(
 
 
 def _render_compare_models_diagnostic(selected_asset: str) -> None:
-    """Render the existing model comparison inside Advanced Diagnostics."""
+    """Render shared-registry model comparison inside Advanced Diagnostics."""
     st.markdown('<p class="main-header">Model Comparison</p>', unsafe_allow_html=True)
     st.markdown("---")
-    if not st.session_state.trained:
-        st.warning("No models trained yet. Open Train Models first.")
-        return
-
-    _stop_if_asset_mismatch(selected_asset)
-    trainer = st.session_state.trainer
-    viz = Visualizer()
-    metric = st.selectbox(
-        "Sort/compare by metric",
-        ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"],
-        key="advanced_compare_metric",
-    )
-    board = trainer.get_leaderboard("test")
-    st.dataframe(board, width="stretch")
-    st.markdown("### Baseline Checks")
-    data = st.session_state.data
-    try:
-        baseline_board = price_baseline_leaderboard(data)
-        st.caption(
-            "Baselines use only known price anchors. Naive baseline means tomorrow's price equals today's price."
-        )
-        st.dataframe(baseline_board, width="stretch")
-        summary = model_vs_naive_summary(board, baseline_board)
-        if summary:
-            improvement = summary["rmse_improvement_pct"]
-            if improvement > 0:
-                st.success(
-                    f"Best model **{summary['best_model']}** beats Naive RMSE by **{improvement:.2f}%** "
-                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
-                )
-            else:
-                st.error(
-                    f"Best model **{summary['best_model']}** does not beat Naive RMSE "
-                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
-                )
-    except Exception as exc:
-        st.warning(f"Could not calculate baseline checks: {exc}")
-
-    st.plotly_chart(viz.plot_model_comparison_plotly(board, metric=metric), width="stretch")
-    best_name, best_result = trainer.get_best_model("test")
-    st.success(
-        f"Best model: **{best_name}** | RMSE = {best_result.metrics_test['RMSE']:.2f}, "
-        f"R2 = {best_result.metrics_test['R2']:.4f}"
-    )
-    st.markdown(f"### Actual vs Predicted - {selected_asset} (Best Model)")
-    fig = viz.plot_actual_vs_predicted_plotly(
-        data.prices_test,
-        best_result.predictions_test,
-        data.test_index,
-        title=f"{selected_asset} / {best_name} - Actual vs Predicted",
-    )
-    st.plotly_chart(fig, width="stretch")
+    _render_registry_compare_models(selected_asset, metric_key="advanced_compare_metric")
 
 
 def _render_30_days_forecast_diagnostic(selected_asset: str, target_col: str) -> None:
-    """Render the existing recursive forecast as a clearly labeled diagnostic."""
+    """Render shared-registry recursive forecast as a diagnostic."""
     st.warning(
         "Legacy diagnostic view - recursive price chaining is not the primary forecasting evidence. "
         "Use validated direct-horizon and walk-forward results for research conclusions."
     )
     st.markdown('<p class="main-header">30-Day Price Forecast</p>', unsafe_allow_html=True)
     st.markdown("---")
-    if not st.session_state.trained:
-        st.warning("No models trained yet. Open Train Models first.")
-        return
-
-    _stop_if_asset_mismatch(selected_asset)
-    trainer = st.session_state.trainer
-    pp = st.session_state.pp
-    data = st.session_state.data
-    df_features = st.session_state.df_features
-    model_name = st.selectbox(
-        "Select a model for forecasting",
-        list(trainer.results.keys()),
-        key="advanced_forecast_model",
-    )
-    n_days = st.slider(
-        "Forecast horizon (days)", 5, 60, 30, key="advanced_forecast_days"
-    )
-    if not st.button("Generate Forecast", type="primary", key="advanced_generate_forecast"):
-        return
-
-    with st.spinner(f"Generating {n_days}-day forecast..."):
-        result = trainer.results[model_name]
-        predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
-        active_target_col = getattr(pp, "target_col", target_col)
-        ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
-        fe = FeatureEngineer(target_col=active_target_col)
-        try:
-            forecast_df = predictor.forecast(
-                df_features,
-                feature_cols=data.feature_cols,
-                n_days=n_days,
-                indicators_engine=ti,
-                feature_engineer=fe,
-            )
-        except ValueError as exc:
-            st.error(str(exc))
-            st.info(
-                "The forecast was stopped before model inference. Retrain the selected "
-                "asset model so its saved feature contract matches the current pipeline."
-            )
-            return
-        volatility = df_features["Daily_Return"].std()
-        forecast_df = predictor.add_confidence_bands(
-            forecast_df, historical_volatility=volatility
-        )
-
-    st.success(f"{n_days}-day {selected_asset} forecast generated using {model_name}")
-    viz = Visualizer()
-    figure = viz.plot_forecast_plotly(
-        forecast_df,
-        df_features,
-        target_col=active_target_col,
-        asset_label=selected_asset,
-        n_history_days=90,
-    )
-    st.plotly_chart(figure, width="stretch")
-    st.markdown("### Forecast Table")
-    st.dataframe(forecast_df, width="stretch")
-    st.download_button(
-        "Download Forecast (CSV)",
-        data=forecast_df.to_csv().encode("utf-8"),
-        file_name=(
-            f"{_safe_filename_part(selected_asset)}_"
-            f"{_safe_filename_part(model_name)}_{n_days}day_forecast.csv"
-        ),
-        mime="text/csv",
-    )
+    _render_registry_30_day_forecast(selected_asset, target_col, key_prefix="advanced_forecast")
 
 
 def _render_advanced_diagnostic_page(
@@ -2743,6 +2638,249 @@ def _build_backtest_frame(data, model_result, target_col: str = DEFAULT_TARGET_C
         index=pd.to_datetime(data.test_index),
     )
 
+
+
+
+def _registry_entries_for_asset(selected_asset: str) -> list[dict]:
+    """Return all registry entries for the selected asset."""
+    entries = get_trained_model_registry(st.session_state)
+    return [entry for entry in entries if str(entry.get("Asset")) == str(selected_asset)]
+
+
+def _forecast_ready_registry_entries(selected_asset: str) -> list[dict]:
+    """Return forecast-usable live model entries for the selected asset."""
+    return get_forecast_ready_models(get_trained_model_registry(st.session_state), asset=selected_asset)
+
+
+def _active_registry_leaderboard(selected_asset: str, metric: str = "RMSE", include_unusable: bool = True) -> pd.DataFrame:
+    return registry_to_leaderboard(
+        get_trained_model_registry(st.session_state),
+        asset=selected_asset,
+        include_unusable=include_unusable,
+        sort_by=metric,
+    )
+
+
+def _metric_value_from_entry(entry: dict, metric: str) -> float:
+    value = pd.to_numeric(pd.Series([entry.get(metric)]), errors="coerce").iloc[0]
+    return float(value) if pd.notna(value) else float("inf")
+
+
+def _best_registry_entry(entries: list[dict], metric: str = "RMSE") -> dict | None:
+    if not entries:
+        return None
+    reverse = metric in {"R2", "DirectionalAccuracy"}
+    usable = [entry for entry in entries if bool(entry.get("UsableForForecast"))]
+    if not usable:
+        return None
+    return sorted(usable, key=lambda e: _metric_value_from_entry(e, metric), reverse=reverse)[0]
+
+
+def _show_registry_empty_state(selected_asset: str) -> None:
+    st.warning("⚠️ No trained model registry found for this session. Go to **Train Models** first.")
+    saved_meta = st.session_state.get("trained_model_registry_metadata")
+    if isinstance(saved_meta, pd.DataFrame) and not saved_meta.empty:
+        st.caption("Saved registry metadata exists, but no live model objects are available for inference after this rerun.")
+        st.dataframe(saved_meta, width="stretch", hide_index=True)
+
+
+def _render_registry_compare_models(selected_asset: str, metric_key: str = "compare_metric") -> None:
+    """Render Compare Models from the shared ML+DL registry without retraining."""
+    entries = _registry_entries_for_asset(selected_asset)
+    if not entries:
+        _show_registry_empty_state(selected_asset)
+        return
+
+    metric = st.selectbox(
+        "Sort/compare by metric",
+        ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"],
+        key=metric_key,
+    )
+    board = _active_registry_leaderboard(selected_asset, metric=metric, include_unusable=True)
+    if board.empty:
+        st.warning("No registry rows are available for this asset. Train models first.")
+        return
+
+    st.dataframe(board, width="stretch", hide_index=True)
+
+    warnings_df = board[board.get("Warning", "").astype(str).str.len() > 0] if "Warning" in board.columns else pd.DataFrame()
+    if not warnings_df.empty:
+        with st.expander("Model warnings", expanded=False):
+            st.dataframe(warnings_df[[c for c in ["ModelName", "ModelFamily", "Warning"] if c in warnings_df.columns]], width="stretch", hide_index=True)
+
+    forecast_ready = _forecast_ready_registry_entries(selected_asset)
+    if not forecast_ready:
+        st.info("Training finished, but no model in the registry is currently usable for forecasting. Review warnings above.")
+        return
+
+    st.markdown("### Baseline Checks")
+    data = forecast_ready[0].get("DataObject")
+    try:
+        baseline_board = price_baseline_leaderboard(data)
+        st.caption("Baselines use only known price anchors. Naive baseline means tomorrow's price equals today's price.")
+        st.dataframe(baseline_board, width="stretch")
+        summary = model_vs_naive_summary(board, baseline_board)
+        if summary:
+            improvement = summary["rmse_improvement_pct"]
+            if improvement > 0:
+                st.success(
+                    f"Best model **{summary['best_model']}** beats Naive RMSE by **{improvement:.2f}%** "
+                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
+                )
+            else:
+                st.error(
+                    f"Best model **{summary['best_model']}** does NOT beat Naive RMSE "
+                    f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
+                )
+    except Exception as exc:
+        st.warning(f"Could not calculate baseline checks: {exc}")
+
+    try:
+        viz = Visualizer()
+        st.plotly_chart(viz.plot_model_comparison_plotly(board, metric=metric), width="stretch")
+    except Exception as exc:
+        st.caption(f"Comparison chart unavailable: {exc}")
+
+    best_entry = _best_registry_entry(forecast_ready, metric=metric) or forecast_ready[0]
+    st.success(
+        f"🏆 Best registry model: **{best_entry.get('ModelFamily')} · {best_entry.get('ModelName')}** — "
+        f"RMSE = {pd.to_numeric(pd.Series([best_entry.get('RMSE')]), errors='coerce').iloc[0]:.4f}"
+    )
+
+    option_map = {entry["DisplayName"]: entry for entry in forecast_ready}
+    selected_label = st.selectbox("Actual vs predicted plot model", list(option_map.keys()), key=f"{metric_key}_plot_model")
+    plot_entry = option_map[selected_label]
+    data = plot_entry.get("DataObject")
+    result_obj = plot_entry.get("ResultObject")
+    if data is not None and result_obj is not None:
+        try:
+            st.markdown(f"### Actual vs Predicted — {selected_asset} ({plot_entry.get('ModelName')})")
+            viz = Visualizer()
+            fig = viz.plot_actual_vs_predicted_plotly(
+                data.prices_test,
+                result_obj.predictions_test,
+                data.test_index,
+                title=f"{selected_asset} / {plot_entry.get('ModelFamily')} · {plot_entry.get('ModelName')} — Actual vs Predicted",
+            )
+            st.plotly_chart(fig, width="stretch")
+        except Exception as exc:
+            st.caption(f"Actual-vs-predicted plot unavailable for this model: {exc}")
+
+
+def _registry_historical_volatility(df_features: pd.DataFrame, target_col: str) -> float:
+    if isinstance(df_features, pd.DataFrame) and "Daily_Return" in df_features.columns:
+        value = pd.to_numeric(df_features["Daily_Return"], errors="coerce").dropna().std()
+        if pd.notna(value) and float(value) > 0:
+            return float(value)
+    if isinstance(df_features, pd.DataFrame) and target_col in df_features.columns:
+        returns = pd.to_numeric(df_features[target_col], errors="coerce").dropna().pct_change().dropna()
+        if not returns.empty:
+            return float(returns.std())
+    return 0.02
+
+
+def _render_registry_30_day_forecast(selected_asset: str, target_col: str, key_prefix: str = "forecast") -> None:
+    """Generate recursive forecasts from the selected shared-registry ML or DL model."""
+    entries = _forecast_ready_registry_entries(selected_asset)
+    if not entries:
+        _show_registry_empty_state(selected_asset)
+        return
+
+    option_map = {entry["DisplayName"]: entry for entry in entries}
+    model_label = st.selectbox("Select a model for forecasting", list(option_map.keys()), key=f"{key_prefix}_registry_model")
+    n_days = st.slider("Forecast horizon (days)", 5, 60, 30, key=f"{key_prefix}_registry_days")
+    entry = option_map[model_label]
+
+    st.caption(
+        f"Selected: **{entry.get('ModelFamily')}** model · target `{entry.get('TargetColumn')}` · "
+        f"target mode `{entry.get('TargetMode')}` · sequence model: `{bool(entry.get('IsSequenceModel'))}`"
+    )
+    if bool(entry.get("IsSequenceModel")):
+        st.warning("Recursive DL forecasts are approximate and use the latest rolling sequence window.")
+    else:
+        st.info("Recursive ML forecasts use the latest tabular feature row and recomputed features where possible.")
+
+    if not st.button("🔮 Generate Forecast", type="primary", key=f"{key_prefix}_registry_generate"):
+        return
+
+    model_object = entry.get("ModelObject")
+    pp = entry.get("PreprocessorObject")
+    data = entry.get("DataObject")
+    df_features = entry.get("FeatureFrame")
+    feature_cols = list(entry.get("FeatureColumns") or getattr(data, "feature_cols", []) or [])
+    active_target_col = str(entry.get("TargetColumn") or getattr(pp, "target_col", target_col))
+
+    if model_object is None or pp is None or data is None or not isinstance(df_features, pd.DataFrame) or df_features.empty:
+        st.error("The selected registry entry is missing live model/preprocessor/data objects. Retrain models in this session.")
+        return
+    if bool(entry.get("IsSequenceModel")) and len(df_features) < int(entry.get("SequenceLength") or getattr(pp, "seq_len", 60)):
+        st.error("Not enough recent rows to build the DL sequence window for this model.")
+        return
+
+    with st.spinner(f"Generating {n_days}-day forecast with {entry.get('ModelFamily')} · {entry.get('ModelName')}..."):
+        predictor = Predictor(
+            model=model_object,
+            preprocessor=pp,
+            is_sequence_model=bool(entry.get("IsSequenceModel")),
+        )
+        if bool(entry.get("IsSequenceModel")):
+            predictor.seq_len = int(entry.get("SequenceLength") or getattr(pp, "seq_len", 60))
+        ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
+        fe = FeatureEngineer(target_col=active_target_col)
+        try:
+            forecast_df = predictor.forecast(
+                df_features,
+                feature_cols=feature_cols,
+                n_days=n_days,
+                indicators_engine=ti,
+                feature_engineer=fe,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+            st.info(
+                "The forecast was stopped before model inference. Retrain the selected asset model so its saved feature contract matches the current pipeline."
+            )
+            return
+        except Exception as exc:
+            st.error(f"Forecast failed cleanly for the selected model: {type(exc).__name__}: {exc}")
+            return
+
+        volatility = _registry_historical_volatility(df_features, active_target_col)
+        forecast_df = predictor.add_confidence_bands(forecast_df, historical_volatility=volatility)
+
+    latest_source_date = pd.Timestamp(df_features.index[-1]).date().isoformat()
+    forecast_start = pd.Timestamp(forecast_df.index[0]).date().isoformat() if not forecast_df.empty else ""
+    forecast_end = pd.Timestamp(forecast_df.index[-1]).date().isoformat() if not forecast_df.empty else ""
+
+    st.success(f"✔ {n_days}-day {selected_asset} forecast generated using {entry.get('ModelFamily')} · {entry.get('ModelName')}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Model used", str(entry.get("ModelName")))
+    c2.metric("Model family", str(entry.get("ModelFamily")))
+    c3.metric("Latest source date", latest_source_date)
+    c4.metric("Forecast end", forecast_end)
+    st.caption(f"Forecast start date: {forecast_start}. Recursive multi-day forecasts are approximate research estimates, not guaranteed prices.")
+
+    try:
+        viz = Visualizer()
+        fig = viz.plot_forecast_plotly(
+            forecast_df,
+            df_features,
+            target_col=active_target_col,
+            asset_label=selected_asset,
+            n_history_days=90,
+        )
+        st.plotly_chart(fig, width="stretch")
+    except Exception as exc:
+        st.caption(f"Forecast chart unavailable: {exc}")
+
+    st.markdown("### 30-Day Forecast Table")
+    st.dataframe(forecast_df, width="stretch")
+    st.download_button(
+        "📥 Download Forecast (CSV)",
+        data=forecast_df.to_csv().encode("utf-8"),
+        file_name=f"{_safe_filename_part(selected_asset)}_{_safe_filename_part(entry.get('ModelFamily'))}_{_safe_filename_part(entry.get('ModelName'))}_{n_days}day_forecast.csv",
+        mime="text/csv",
+    )
 
 # ════════════════════════════════════════════════════════════════
 # Session State Initialization
@@ -4705,16 +4843,20 @@ elif page == "🤖 Train Models":
             st.session_state.df_features = result.feature_frame
             st.session_state.trained_asset = result.asset
             st.session_state.trained_horizon = result.horizon
+            set_trained_model_registry(st.session_state, result.model_registry)
+            forecast_ready_models = get_forecast_ready_models(result.model_registry, asset=result.asset)
             st.session_state.trainer = result.ml_trainer or result.dl_trainer
             st.session_state.dl_trainer = result.dl_trainer
-            st.session_state.trained = True
+            st.session_state.trained = bool(forecast_ready_models)
             st.session_state.last_training_result = {
-                "Status": "Complete",
+                "Status": "Complete" if forecast_ready_models else "Completed with warnings",
                 "Asset": result.asset,
                 "Horizon": result.horizon,
                 "ModelFamilies": list(result.model_families),
                 "ModelCount": result.model_count,
+                "WarningCount": result.warning_count,
                 "Leaderboard": result.leaderboard,
+                "RegistryLeaderboard": registry_to_leaderboard(result.model_registry, asset=result.asset, include_unusable=True),
                 "ArtifactPaths": list(result.artifact_paths),
                 "CompletedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -4746,9 +4888,10 @@ elif page == "🤖 Train Models":
         st.caption(
             f"Status: {last_training_result.get('Status')} | Model families: {families} | "
             f"Successful models: {int(last_training_result.get('ModelCount', 0))} | "
+            f"Warnings: {int(last_training_result.get('WarningCount', 0))} | "
             f"Completed: {last_training_result.get('CompletedAt')}"
         )
-        board = last_training_result.get("Leaderboard")
+        board = last_training_result.get("RegistryLeaderboard") or last_training_result.get("Leaderboard")
         if isinstance(board, pd.DataFrame) and not board.empty:
             st.dataframe(board, width="stretch", hide_index=True)
         artifact_paths = last_training_result.get("ArtifactPaths", [])
@@ -4773,55 +4916,8 @@ elif page == "🤖 Train Models":
 elif page == "🏆 Compare Models":
     st.markdown('<p class="main-header">🏆 Model Comparison</p>', unsafe_allow_html=True)
     st.markdown("---")
-
-    if not st.session_state.trained:
-        st.warning("⚠️ No models trained yet. Go to **Train Models** first.")
-    else:
-        _stop_if_asset_mismatch(selected_asset)
-        trainer = st.session_state.trainer
-        viz = Visualizer()
-
-        metric = st.selectbox("Sort/compare by metric", ["RMSE", "MAE", "MAPE", "R2", "DirectionalAccuracy"])
-        board = trainer.get_leaderboard("test")
-
-        st.dataframe(board, width="stretch")
-
-        st.markdown("### Baseline Checks")
-        data = st.session_state.data
-        try:
-            baseline_board = price_baseline_leaderboard(data)
-            st.caption("Baselines use only known price anchors. Naive baseline means: tomorrow's price = today's price.")
-            st.dataframe(baseline_board, width="stretch")
-
-            summary = model_vs_naive_summary(board, baseline_board)
-            if summary:
-                improvement = summary["rmse_improvement_pct"]
-                if improvement > 0:
-                    st.success(
-                        f"Best model **{summary['best_model']}** beats Naive RMSE by **{improvement:.2f}%** "
-                        f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
-                    )
-                else:
-                    st.error(
-                        f"Best model **{summary['best_model']}** does NOT beat Naive RMSE "
-                        f"({summary['best_model_rmse']} vs {summary['naive_rmse']})."
-                    )
-        except Exception as exc:
-            st.warning(f"Could not calculate baseline checks: {exc}")
-
-        fig = viz.plot_model_comparison_plotly(board, metric=metric)
-        st.plotly_chart(fig, width="stretch")
-
-        best_name, best_result = trainer.get_best_model("test")
-        st.success(f"🏆 Best Model: **{best_name}** — RMSE = ${best_result.metrics_test['RMSE']:.2f}, R² = {best_result.metrics_test['R2']:.4f}")
-
-        st.markdown(f"### Actual vs Predicted — {selected_asset} (Best Model)")
-        data = st.session_state.data
-        fig2 = viz.plot_actual_vs_predicted_plotly(
-            data.prices_test, best_result.predictions_test, data.test_index,
-            title=f"{selected_asset} / {best_name} — Actual vs Predicted",
-        )
-        st.plotly_chart(fig2, width="stretch")
+    _stop_if_asset_mismatch(selected_asset)
+    _render_registry_compare_models(selected_asset, metric_key="compare_models_metric")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -11712,62 +11808,5 @@ elif page == "📅 30-Day Forecast":
     )
     st.markdown('<p class="main-header">📅 30-Day Price Forecast</p>', unsafe_allow_html=True)
     st.markdown("---")
-
-    if not st.session_state.trained:
-        st.warning("⚠️ No models trained yet. Go to **Train Models** first.")
-    else:
-        _stop_if_asset_mismatch(selected_asset)
-        trainer = st.session_state.trainer
-        pp = st.session_state.pp
-        data = st.session_state.data
-        df_features = st.session_state.df_features
-
-        model_name = st.selectbox("Select a model for forecasting", list(trainer.results.keys()))
-        n_days = st.slider("Forecast horizon (days)", 5, 60, 30)
-
-        if st.button("🔮 Generate Forecast", type="primary"):
-            with st.spinner(f"Generating {n_days}-day forecast..."):
-                result = trainer.results[model_name]
-                predictor = Predictor(model=result.model, preprocessor=pp, is_sequence_model=False)
-
-                active_target_col = getattr(pp, "target_col", target_col)
-                ti = TechnicalIndicators(prefix=_target_prefix(active_target_col))
-                fe = FeatureEngineer(target_col=active_target_col)
-
-                try:
-                    forecast_df = predictor.forecast(
-                        df_features, feature_cols=data.feature_cols, n_days=n_days,
-                        indicators_engine=ti, feature_engineer=fe,
-                    )
-                except ValueError as exc:
-                    st.error(str(exc))
-                    st.info(
-                        "The forecast was stopped before model inference. Retrain the selected "
-                        "asset model so its saved feature contract matches the current pipeline."
-                    )
-                    st.stop()
-                vol = df_features["Daily_Return"].std()
-                forecast_df = predictor.add_confidence_bands(forecast_df, historical_volatility=vol)
-
-            st.success(f"✔ {n_days}-day {selected_asset} forecast generated using {model_name}")
-
-            viz = Visualizer()
-            fig = viz.plot_forecast_plotly(
-                forecast_df,
-                df_features,
-                target_col=active_target_col,
-                asset_label=selected_asset,
-                n_history_days=90,
-            )
-            st.plotly_chart(fig, width="stretch")
-
-            st.markdown("### Forecast Table")
-            st.dataframe(forecast_df, width="stretch")
-
-            csv = forecast_df.to_csv().encode("utf-8")
-            st.download_button(
-                "📥 Download Forecast (CSV)",
-                data=csv,
-                file_name=f"{_safe_filename_part(selected_asset)}_{_safe_filename_part(model_name)}_{n_days}day_forecast.csv",
-                mime="text/csv",
-            )
+    _stop_if_asset_mismatch(selected_asset)
+    _render_registry_30_day_forecast(selected_asset, target_col, key_prefix="main_30_day_forecast")

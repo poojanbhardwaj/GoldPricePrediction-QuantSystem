@@ -8,6 +8,12 @@ from typing import Any, Callable, Optional
 import pandas as pd
 
 from src.train import ModelTrainer
+from src.trained_model_registry import (
+    build_failure_entry,
+    build_registry_entries,
+    registry_to_leaderboard,
+    save_trained_model_registry,
+)
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -33,11 +39,22 @@ class TrainingWorkflowResult:
     data: Optional[Any] = None
     feature_frame: pd.DataFrame = field(default_factory=pd.DataFrame)
     artifact_paths: tuple[str, ...] = ()
+    model_registry: list[dict[str, Any]] = field(default_factory=list)
+    warning_count: int = 0
 
 
 def _notify(callback: Optional[ProgressCallback], value: int, message: str) -> None:
     if callback is not None:
         callback(int(value), str(message))
+
+
+def _prefixed_leaderboard(board: pd.DataFrame, family: str) -> pd.DataFrame:
+    if not isinstance(board, pd.DataFrame) or board.empty:
+        return pd.DataFrame()
+    out = board.copy()
+    if "ModelFamily" not in out.columns:
+        out.insert(0, "ModelFamily", str(family).upper())
+    return out
 
 
 def run_training_pipeline(
@@ -53,7 +70,13 @@ def run_training_pipeline(
     prepare_data: Callable[..., tuple[Any, Any]],
     progress_callback: Optional[ProgressCallback] = None,
 ) -> TrainingWorkflowResult:
-    """Run the project's existing ML/DL trainers without changing their logic."""
+    """Run the project's existing ML/DL trainers and register all results once.
+
+    DL remains optional. If TensorFlow/Keras is unavailable, the app returns
+    clean warning rows for DL models instead of crashing ML training or app
+    startup. Successful ML and DL models are collected into one shared registry
+    used by Compare Models and Forecast pages.
+    """
     if not train_ml and not train_dl:
         raise TrainingInputUnavailable("Select at least one model family before starting training.")
 
@@ -78,6 +101,7 @@ def run_training_pipeline(
     leaderboards: list[pd.DataFrame] = []
     ml_trainer = None
     dl_trainer = None
+    dl_failures: dict[str, str] = {}
     model_count = 0
 
     if train_ml:
@@ -90,37 +114,81 @@ def run_training_pipeline(
         )
         ml_trainer.train_all_ml(data)
         model_count += len(ml_trainer.results)
-        ml_board = ml_trainer.get_leaderboard("test")
-        if isinstance(ml_board, pd.DataFrame) and not ml_board.empty:
-            ml_board = ml_board.copy()
-            ml_board.insert(0, "ModelFamily", "ML")
+        ml_board = _prefixed_leaderboard(ml_trainer.get_leaderboard("test"), "ML")
+        if not ml_board.empty:
             leaderboards.append(ml_board)
 
     if train_dl:
         model_families.append("DL")
         _notify(progress_callback, 72, "Training deep-learning models...")
-        from src.train_dl import DLModelTrainer
+        try:
+            from src.train_dl import DLModelTrainer
 
-        dl_trainer = DLModelTrainer(
-            preprocessor=preprocessor,
-            epochs=int(dl_epochs),
-            verbose=0,
-        )
-        dl_trainer.train_all_dl(data)
-        model_count += len(dl_trainer.results)
-        dl_board = dl_trainer.get_leaderboard("test")
-        if isinstance(dl_board, pd.DataFrame) and not dl_board.empty:
-            dl_board = dl_board.copy()
-            dl_board.insert(0, "ModelFamily", "DL")
-            leaderboards.append(dl_board)
+            dl_trainer = DLModelTrainer(
+                preprocessor=preprocessor,
+                epochs=int(dl_epochs),
+                verbose=0,
+            )
+            dl_trainer.train_all_dl(data)
+            model_count += len(dl_trainer.results)
+            dl_failures = dict(getattr(dl_trainer, "failures", {}) or {})
+            dl_board = _prefixed_leaderboard(dl_trainer.get_leaderboard("test"), "DL")
+            if not dl_board.empty:
+                leaderboards.append(dl_board)
+        except Exception as exc:
+            # Import/setup-level failures are converted into one clean warning
+            # entry instead of crashing the Streamlit app.
+            dl_failures = {
+                "DL setup": (
+                    f"Deep-learning training is unavailable in this environment: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+            }
 
-    if model_count == 0:
+    _notify(progress_callback, 88, "Registering trained models...")
+    registry_entries = build_registry_entries(
+        asset=str(asset),
+        horizon=int(horizon),
+        target_col=str(target_col),
+        preprocessor=preprocessor,
+        data=data,
+        feature_frame=feature_frame,
+        ml_trainer=ml_trainer,
+        dl_trainer=dl_trainer,
+        dl_failures=dl_failures,
+    )
+
+    # If a setup-level DL failure happened before a DL trainer object existed,
+    # build_registry_entries cannot see it, so add it explicitly.
+    if train_dl and dl_trainer is None and dl_failures:
+        for name, warning in dl_failures.items():
+            registry_entries.append(
+                build_failure_entry(
+                    model_name=name,
+                    model_family="DL",
+                    asset=str(asset),
+                    target_col=str(target_col),
+                    horizon=int(horizon),
+                    warning=warning,
+                    preprocessor=preprocessor,
+                    data=data,
+                    feature_frame=feature_frame,
+                )
+            )
+
+    warning_count = sum(1 for entry in registry_entries if str(entry.get("Warning") or "").strip())
+    registry_board = registry_to_leaderboard(registry_entries, include_unusable=True)
+    artifact_paths = tuple(save_trained_model_registry(registry_entries)) if registry_entries else ()
+
+    if model_count == 0 and not registry_entries:
         raise RuntimeError(
-            "Training finished without a successful model. Review the training error details and dependencies."
+            "Training finished without a successful model and no warning entries were produced. "
+            "Review the training error details and dependencies."
         )
 
     _notify(progress_callback, 92, "Finalizing session training results...")
-    leaderboard = pd.concat(leaderboards, ignore_index=True) if leaderboards else pd.DataFrame()
+    legacy_leaderboard = pd.concat(leaderboards, ignore_index=True) if leaderboards else pd.DataFrame()
+    leaderboard = registry_board if isinstance(registry_board, pd.DataFrame) and not registry_board.empty else legacy_leaderboard
     return TrainingWorkflowResult(
         asset=str(asset),
         horizon=int(horizon),
@@ -133,4 +201,7 @@ def run_training_pipeline(
         preprocessor=preprocessor,
         data=data,
         feature_frame=feature_frame,
+        artifact_paths=artifact_paths,
+        model_registry=registry_entries,
+        warning_count=int(warning_count),
     )

@@ -112,6 +112,9 @@ class DLModelTrainer:
         self.predict_returns = bool(getattr(preprocessor, "predict_returns", False))
 
         self.results: Dict[str, DLModelResult] = {}
+        # Failed DL models are retained as non-forecast-ready warnings so the
+        # UI can show exactly what failed without breaking successful ML/DL runs.
+        self.failures: Dict[str, str] = {}
         self.checkpoints_dir = cfg.resolve_path("models_checkpoints")
         self.models_dir       = cfg.resolve_path("models_saved")
 
@@ -145,7 +148,9 @@ class DLModelTrainer:
                     f"Train time={result.train_time_sec:.2f}s"
                 )
             except Exception as exc:
-                logger.error(f"Training failed for {name}: {exc}")
+                message = f"{type(exc).__name__}: {exc}"
+                self.failures[name] = message
+                logger.error(f"Training failed for {name}: {message}")
 
         logger.info(f"{'─'*50}")
         logger.info(f"All DL models trained: {len(self.results)}/{len(trainers)} succeeded")
