@@ -311,9 +311,8 @@ def _table_research_explanation(title: str) -> str:
     return "Read this table as research evidence for the selected asset/horizon, not as an execution instruction."
 
 
-@st.cache_data(show_spinner=False)
 def _load_cached_market_history() -> pd.DataFrame:
-    """Load the local master dataset only; never trigger a download from a primary page."""
+    """Load the local master dataset from disk on each rerun so refreshed CSV dates are visible."""
     path = Path(__file__).resolve().parent / "data" / "processed" / "master_dataset.csv"
     if not path.exists():
         return pd.DataFrame()
@@ -408,11 +407,17 @@ def _phase29_public_source_labels(
     report: object = None,
 ) -> tuple[str, str]:
     """Return plain-language research and price provenance labels."""
-    source = str(snapshot_source or "placeholder")
-    if source == "session":
+    source = str(snapshot_source or "placeholder").casefold()
+    is_session = any(token in source for token in ("session", "refresh", "latest"))
+    is_saved = any(token in source for token in ("saved", "artifact", "last_good", "checked-in"))
+    is_cached = any(token in source for token in ("cached", "dataset", "master", "price", "placeholder"))
+
+    if is_session:
         research_label = "Latest refreshed research snapshot"
-    elif source in {"saved_artifact", "last_good"}:
+    elif is_saved:
         research_label = "Saved research snapshot"
+    elif is_cached:
+        research_label = "Cached market snapshot"
     else:
         research_label = "Source unavailable"
 
@@ -420,7 +425,7 @@ def _phase29_public_source_labels(
     refreshed_price = str(report_data.get("PriceDisplaySource", "")).casefold().startswith("latest refreshed")
     price_label = (
         "Latest refreshed research snapshot"
-        if source == "session" and refreshed_price
+        if (is_session and refreshed_price) or "refresh" in source
         else "Cached market snapshot"
     )
     return research_label, price_label
@@ -619,12 +624,15 @@ def _activate_phase29_report(report: dict, *, refresh: bool) -> dict:
     if _phase29_displayable_snapshot(active):
         report["AllAssetPredictionSnapshot"] = active
         report["SnapshotSource"] = "Latest refreshed session snapshot" if refresh else "Session research snapshot"
+        snapshot_has_predictions = _has_real_phase29_predictions(active)
+        snapshot_source = "session" if snapshot_has_predictions else ("session_refresh_price" if refresh else "session_price")
+        st.session_state.phase29_snapshot_source = snapshot_source
         st.session_state.active_research_snapshot = active
         st.session_state.active_prediction_snapshot = active
         st.session_state.research_snapshot_source = "session_refresh" if refresh else "session_run"
         st.session_state.research_snapshot_generated_at = pd.Timestamp.utcnow().isoformat()
         st.session_state.research_snapshot_complete = True
-        st.session_state.prediction_snapshot_complete = _has_real_phase29_predictions(active)
+        st.session_state.prediction_snapshot_complete = snapshot_has_predictions
 
     cost_plans = report.get("CostAwarePlans")
     if not isinstance(cost_plans, pd.DataFrame) or cost_plans.empty:
@@ -659,25 +667,48 @@ def _store_phase29_run_report(report: dict, refresh: bool = False, **kwargs) -> 
     return report
 
 def _get_phase29_snapshot() -> pd.DataFrame:
-    """Prefer refreshed session snapshot, then session report, then saved artifacts."""
+    """Prefer real prediction snapshots over price-only placeholders, then fall back to prices."""
     active_snapshot = st.session_state.get("active_research_snapshot")
-    if _phase29_displayable_snapshot(active_snapshot):
+    if _has_real_phase29_predictions(active_snapshot):
+        st.session_state.phase29_snapshot_source = "session"
         return active_snapshot.copy()
 
     report = st.session_state.get("phase29_user_report")
     if isinstance(report, dict):
         session_snapshot = _phase29_snapshot_from_report(report)
-        if _phase29_displayable_snapshot(session_snapshot):
+        if _has_real_phase29_predictions(session_snapshot):
             st.session_state.active_research_snapshot = session_snapshot
             st.session_state.active_prediction_snapshot = session_snapshot
+            st.session_state.phase29_snapshot_source = "session"
             return session_snapshot.copy()
 
     saved_snapshot = _load_phase29_table("phase29_all_asset_prediction_snapshot.csv")
-    if _phase29_displayable_snapshot(saved_snapshot):
-        return _normalize_phase29_snapshot(
-            saved_snapshot,
-            source_label="Checked-in saved research snapshot",
-        ).copy()
+    normalized_saved = _normalize_phase29_snapshot(
+        saved_snapshot,
+        source_label="Checked-in saved research snapshot",
+    )
+    if _has_real_phase29_predictions(normalized_saved):
+        st.session_state.phase29_snapshot_source = "saved_artifact"
+        st.session_state.active_research_snapshot = normalized_saved
+        st.session_state.active_prediction_snapshot = normalized_saved
+        return normalized_saved.copy()
+
+    # Only use price-only session data when no real saved/session prediction snapshot exists.
+    if _phase29_displayable_snapshot(active_snapshot):
+        st.session_state.phase29_snapshot_source = st.session_state.get("phase29_snapshot_source", "session_price")
+        return active_snapshot.copy()
+
+    if isinstance(report, dict):
+        session_snapshot = _phase29_snapshot_from_report(report)
+        if _phase29_displayable_snapshot(session_snapshot):
+            st.session_state.active_research_snapshot = session_snapshot
+            st.session_state.active_prediction_snapshot = session_snapshot
+            st.session_state.phase29_snapshot_source = "session_price"
+            return session_snapshot.copy()
+
+    if _phase29_displayable_snapshot(normalized_saved):
+        st.session_state.phase29_snapshot_source = "saved_artifact"
+        return normalized_saved.copy()
 
     return pd.DataFrame()
 
@@ -761,6 +792,9 @@ def _hydrate_saved_research_state() -> None:
             hydrated_report["CostAwareAssetPlans"] = phase29_cost_plans
         hydrated_report["SnapshotSource"] = "Checked-in saved research demo"
         hydrated_report["PriceDisplaySource"] = "Cached market snapshot"
+        st.session_state.phase29_snapshot_source = "saved_artifact"
+        st.session_state.active_research_snapshot = phase29_snapshot
+        st.session_state.active_prediction_snapshot = phase29_snapshot
         st.session_state.phase29_user_report = hydrated_report
 
     for state_key, table in (
@@ -773,8 +807,8 @@ def _hydrate_saved_research_state() -> None:
             st.session_state[state_key] = table
 
 
-@st.cache_data(show_spinner=False, ttl=300)
 def _latest_user_price_snapshot() -> pd.DataFrame:
+    """Build the current price snapshot from the latest master_dataset.csv on disk."""
     return get_latest_asset_prices(_load_cached_market_history())
 
 
@@ -3051,7 +3085,8 @@ if page == "Market Research Assistant":
                 )
                 st.session_state.phase26_research_snapshot = phase29_report.get("ResearchSnapshot")
                 st.session_state.phase26_asset_plans = phase29_report.get("AssetPlans")
-                _latest_user_price_snapshot.clear()
+                if hasattr(_latest_user_price_snapshot, "clear"):
+                    _latest_user_price_snapshot.clear()
                 for warning in phase29_report.get("Warnings", []):
                     st.warning(warning)
                 st.write("Saving snapshot")

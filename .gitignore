@@ -112,3 +112,6 @@ requirements_additions.txt
 pip_freeze.txt
 project_tree.txt
 .pytest-phase*/
+dashboard_hotfix/
+app_before_dashboard_hotfix.py
+!.env.example
