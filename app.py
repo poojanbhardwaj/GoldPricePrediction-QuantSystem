@@ -427,18 +427,26 @@ def _load_phase29_table(filename: str) -> pd.DataFrame:
 
 
 def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
-    """Return True when a Phase 29 snapshot has usable numeric prediction estimates."""
-    # DEPLOY_SAFE_PREDICTION_DETECTOR_V2
+    """Return True when a Phase 29 snapshot has usable prediction values.
+
+    Deployment note:
+    Streamlit Cloud may read CSV columns as strings/objects. This detector must
+    not reject a valid checked-in prediction snapshot just because formatting,
+    commas, percent signs, BOM characters, or dtype inference differ.
+    """
+    # DEPLOY_SAFE_PREDICTION_DETECTOR_V3
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return False
 
     table = frame.copy()
     table.columns = [str(col).strip().lstrip(chr(65279)) for col in table.columns]
 
-    if "Asset" in table.columns:
-        asset_values = table["Asset"].astype("string").str.strip()
-        if not bool(asset_values.ne("").fillna(False).any()):
-            return False
+    if "Asset" not in table.columns:
+        return False
+
+    asset_values = table["Asset"].astype("string").str.strip()
+    if not bool(asset_values.ne("").fillna(False).any()):
+        return False
 
     prediction_columns = [
         col for col in (
@@ -446,6 +454,7 @@ def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
             "PredictedMovePct",
             "GrossActiveEstimatePct",
             "NetActiveEstimatePct",
+            "OpportunityScore",
         )
         if col in table.columns
     ]
@@ -466,6 +475,8 @@ def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
         "null",
         "na",
         "n/a",
+        "-",
+        "--",
     }
 
     for column in prediction_columns:
@@ -475,6 +486,7 @@ def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
             .str.strip()
             .str.replace(",", "", regex=False)
             .str.replace("%", "", regex=False)
+            .str.replace("$", "", regex=False)
         )
         cleaned = cleaned.mask(cleaned.str.casefold().isin(placeholder_values))
         numeric = pd.to_numeric(cleaned, errors="coerce")
