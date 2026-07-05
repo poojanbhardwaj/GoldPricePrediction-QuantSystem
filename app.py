@@ -351,21 +351,72 @@ def _load_phase26_table(artifact_name: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def _load_phase29_table(filename: str) -> pd.DataFrame:
+def _phase29_candidate_paths(filename: str) -> list[Path]:
+    """Return safe locations where deployed/local Phase 29 CSV artifacts may exist.
+
+    Streamlit Cloud runs from the cloned repo root, while local runs can be started from
+    a parent folder or a copied app.py.  Searching these deterministic locations avoids
+    silently falling back to price-only cards when the checked-in prediction CSV exists.
+    """
     safe_filename = Path(str(filename)).name
-    path = (
-        Path(__file__).resolve().parent
-        / "artifacts"
-        / "latest"
-        / PHASE29_FINAL_USER_EXPERIENCE
-        / safe_filename
-    )
-    if not path.exists():
-        return pd.DataFrame()
+    app_root = Path(__file__).resolve().parent
+    cwd = Path.cwd().resolve()
+    phase_dir = Path("artifacts") / "latest" / PHASE29_FINAL_USER_EXPERIENCE
+    candidates = [
+        app_root / phase_dir / safe_filename,
+        cwd / phase_dir / safe_filename,
+        app_root.parent / phase_dir / safe_filename,
+    ]
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _record_phase29_artifact_diagnostics(filename: str, checks: list[dict]) -> None:
+    """Keep non-secret artifact diagnostics visible inside the running Streamlit app."""
     try:
-        return pd.read_csv(path)
+        st.session_state.phase29_artifact_diagnostics = {
+            "filename": Path(str(filename)).name,
+            "checks": checks,
+        }
     except Exception:
-        return pd.DataFrame()
+        pass
+
+
+def _load_phase29_table(filename: str) -> pd.DataFrame:
+    checks: list[dict] = []
+    for path in _phase29_candidate_paths(filename):
+        item = {
+            "path": str(path),
+            "exists": bool(path.exists()),
+            "size_bytes": int(path.stat().st_size) if path.exists() else 0,
+        }
+        if not path.exists():
+            checks.append(item)
+            continue
+        try:
+            table = pd.read_csv(path)
+            item["rows"] = int(len(table))
+            item["columns"] = list(map(str, table.columns[:12]))
+            item["has_predictions"] = bool(_has_real_phase29_predictions(table)) if "_has_real_phase29_predictions" in globals() else False
+            checks.append(item)
+            _record_phase29_artifact_diagnostics(filename, checks)
+            if not table.empty:
+                return table
+        except Exception as exc:
+            item["error"] = _safe_phase29_warning(exc) if "_safe_phase29_warning" in globals() else str(exc)[:1000]
+            checks.append(item)
+            try:
+                logger.warning("Could not load Phase 29 artifact %s from %s: %s", filename, path, exc)
+            except Exception:
+                pass
+    _record_phase29_artifact_diagnostics(filename, checks)
+    return pd.DataFrame()
 
 
 def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
@@ -3099,12 +3150,30 @@ if page == "Market Research Assistant":
 
     phase29_snapshot = _get_phase29_snapshot()
     if not _has_real_phase29_predictions(phase29_snapshot):
-        st.warning(
-            "Prediction snapshot unavailable. Showing cached market prices only. Refresh / rebuild the "
-            "research snapshot or check saved forecast artifacts."
+        # Last-resort forced reload from the checked-in CSV before showing price-only cards.
+        # This makes deployed Streamlit sessions resilient to stale session_state or cache.
+        forced_saved_snapshot = _normalize_phase29_snapshot(
+            _load_phase29_table("phase29_all_asset_prediction_snapshot.csv"),
+            source_label="Checked-in saved research snapshot",
         )
-        st.session_state.phase29_snapshot_source = "placeholder"
-        phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
+        if _has_real_phase29_predictions(forced_saved_snapshot):
+            phase29_snapshot = forced_saved_snapshot.copy()
+            st.session_state.phase29_snapshot_source = "saved_artifact"
+            st.session_state.active_research_snapshot = forced_saved_snapshot
+            st.session_state.active_prediction_snapshot = forced_saved_snapshot
+            st.session_state.prediction_snapshot_complete = True
+        else:
+            st.warning(
+                "Prediction snapshot unavailable. Showing cached market prices only. The app checked the "
+                "saved Phase 29 CSV and could not load valid prediction rows."
+            )
+            diagnostics = st.session_state.get("phase29_artifact_diagnostics")
+            if diagnostics:
+                with st.expander("Snapshot loading diagnostics", expanded=False):
+                    st.caption("Safe path, existence, row-count, and CSV parse checks for the saved prediction artifact.")
+                    st.json(diagnostics)
+            st.session_state.phase29_snapshot_source = "placeholder"
+            phase29_snapshot = _phase29_placeholder_snapshot(_latest_user_price_snapshot())
     elif st.session_state.get("phase29_snapshot_notice"):
         st.warning(str(st.session_state.phase29_snapshot_notice))
     latest_report = st.session_state.get("phase29_user_report")
