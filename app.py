@@ -427,14 +427,14 @@ def _load_phase29_table(filename: str) -> pd.DataFrame:
 
 
 def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
-    """Return True when a Phase 29 snapshot has usable prediction values.
+    """Return True only when a snapshot has real forecast estimates.
 
-    Deployment note:
-    Streamlit Cloud may read CSV columns as strings/objects. This detector must
-    not reject a valid checked-in prediction snapshot just because formatting,
-    commas, percent signs, BOM characters, or dtype inference differ.
+    Important:
+    OpportunityScore alone is NOT a prediction. Price-only placeholder snapshots
+    may contain OpportunityScore, but they must not block the saved Phase 29
+    prediction artifact.
     """
-    # DEPLOY_SAFE_PREDICTION_DETECTOR_V3
+    # DEPLOY_SAFE_PREDICTION_DETECTOR_V4
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return False
 
@@ -454,7 +454,6 @@ def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
             "PredictedMovePct",
             "GrossActiveEstimatePct",
             "NetActiveEstimatePct",
-            "OpportunityScore",
         )
         if col in table.columns
     ]
