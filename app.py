@@ -420,26 +420,62 @@ def _load_phase29_table(filename: str) -> pd.DataFrame:
 
 
 def _has_real_phase29_predictions(frame: pd.DataFrame) -> bool:
-    """Return whether a Phase 29 snapshot contains at least one saved prediction."""
-    if not isinstance(frame, pd.DataFrame) or frame.empty or "Asset" not in frame.columns:
+    """Return True when a Phase 29 snapshot has usable numeric prediction estimates."""
+    # DEPLOY_SAFE_PREDICTION_DETECTOR_V2
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
         return False
+
+    table = frame.copy()
+    table.columns = [str(col).strip().lstrip(chr(65279)) for col in table.columns]
+
+    if "Asset" in table.columns:
+        asset_values = table["Asset"].astype("string").str.strip()
+        if not bool(asset_values.ne("").fillna(False).any()):
+            return False
+
     prediction_columns = [
-        column for column in ("PredictedPrice", "PredictedMovePct") if column in frame.columns
+        col for col in (
+            "PredictedPrice",
+            "PredictedMovePct",
+            "GrossActiveEstimatePct",
+            "NetActiveEstimatePct",
+        )
+        if col in table.columns
     ]
+
     if not prediction_columns:
         return False
-    placeholder_values = {
-        "run research", "run full research", "no saved estimate", "unlock forecast",
-        "estimate unavailable", "not available", "none", "nan", "",
-    }
-    for column in prediction_columns:
-        values = frame[column]
-        placeholders = values.astype("string").str.strip().str.casefold().isin(placeholder_values)
-        numeric = pd.to_numeric(values.mask(placeholders), errors="coerce")
-        if numeric.notna().any():
-            return True
-    return False
 
+    placeholder_values = {
+        "run research",
+        "run full research",
+        "no saved estimate",
+        "unlock forecast",
+        "estimate unavailable",
+        "not available",
+        "none",
+        "nan",
+        "",
+        "null",
+        "na",
+        "n/a",
+    }
+
+    for column in prediction_columns:
+        cleaned = (
+            table[column]
+            .astype("string")
+            .str.strip()
+            .str.replace(",", "", regex=False)
+            .str.replace("%", "", regex=False)
+        )
+        cleaned = cleaned.mask(cleaned.str.casefold().isin(placeholder_values))
+        numeric = pd.to_numeric(cleaned, errors="coerce")
+
+        if bool(numeric.notna().any()):
+            return True
+
+    return False
 
 def _safe_phase29_warning(value: object) -> str:
     """Redact common credential forms before a run warning reaches diagnostics."""
