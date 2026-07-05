@@ -912,6 +912,71 @@ def _hydrate_saved_research_state() -> None:
             st.session_state[state_key] = table
 
 
+
+def _phase29_saved_latest_price(asset: str) -> float | None:
+    """Read the checked-in Phase 29 latest price for integrity checks."""
+    try:
+        path = (
+            Path(__file__).resolve().parent
+            / "artifacts"
+            / "latest"
+            / PHASE29_FINAL_USER_EXPERIENCE
+            / "phase29_all_asset_prediction_snapshot.csv"
+        )
+        if not path.exists():
+            return None
+        frame = pd.read_csv(path)
+        if frame.empty or "Asset" not in frame.columns or "LatestPrice" not in frame.columns:
+            return None
+        row = frame[frame["Asset"].astype(str).str.casefold() == str(asset).casefold()]
+        if row.empty:
+            return None
+        value = pd.to_numeric(row["LatestPrice"], errors="coerce").dropna()
+        return float(value.iloc[0]) if not value.empty else None
+    except Exception:
+        return None
+
+
+def _detect_suspicious_training_dataset(asset: str, market_data: pd.DataFrame) -> tuple[bool, str]:
+    """Block training when runtime data appears corrupted by synthetic/rate-limit fallback."""
+    if not isinstance(market_data, pd.DataFrame) or market_data.empty:
+        return True, "Training blocked: market dataset is empty."
+
+    target_col = get_asset_target(asset)
+    if target_col not in market_data.columns:
+        return True, f"Training blocked: target column {target_col!r} is missing."
+
+    values = pd.to_numeric(market_data[target_col], errors="coerce").dropna()
+    if values.empty:
+        return True, f"Training blocked: no usable values found for {target_col}."
+
+    latest_price = float(values.iloc[-1])
+    saved_price = _phase29_saved_latest_price(asset)
+
+    suspicious_columns = [
+        col for col in market_data.columns
+        if any(token in str(col).casefold() for token in ("synthetic", "fallback", "simulated"))
+    ]
+    if suspicious_columns:
+        return True, (
+            "Training blocked: dataset contains synthetic/fallback columns "
+            f"{suspicious_columns[:5]}. Refresh later or restore clean saved data first."
+        )
+
+    if saved_price and saved_price > 0 and latest_price > 0:
+        diff_pct = abs(latest_price / saved_price - 1.0) * 100.0
+        if asset == "Gold" and diff_pct > 12.0:
+            return True, (
+                "Training blocked: latest Gold price looks inconsistent with the saved "
+                f"research snapshot. Dataset latest={latest_price:,.2f}, "
+                f"saved snapshot={saved_price:,.2f}, difference={diff_pct:.2f}%. "
+                "This often happens after a Yahoo Finance rate-limit fallback. "
+                "Restore clean data before retraining."
+            )
+
+    return False, ""
+
+
 def _latest_user_price_snapshot() -> pd.DataFrame:
     """Build the current price snapshot from the latest master_dataset.csv on disk."""
     return get_latest_asset_prices(_load_cached_market_history())
