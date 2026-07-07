@@ -2656,26 +2656,43 @@ def _render_user_goals_saved_plans() -> None:
 
 @st.cache_data(show_spinner=False)
 def build_features(df: pd.DataFrame, target_col: str = DEFAULT_TARGET_COLUMN) -> pd.DataFrame:
+    """
+    Build features for one selected asset only.
+
+    Dashboard data may contain calendar-day rows for BTC and missing values for
+    exchange-traded assets. Training must not use rows where the selected target
+    price is missing, otherwise feature/preprocessing can produce no usable rows.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+
+    df = df.sort_index().copy()
+
+    # Critical fix:
+    # Keep the multi-asset dashboard dataset broad, but make model training
+    # asset-specific. For Gold training, remove weekend/BTC-only rows where
+    # Gold_Close is missing. For BTC training, keep BTC rows.
+    if target_col in df.columns:
+        df = df.dropna(subset=[target_col])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Forward-fill supporting market/macro columns after target-calendar filtering.
+    # This is time-series safe because it only carries past known values forward.
+    df = df.ffill()
+
     prefix = _target_prefix(target_col)
     ti = TechnicalIndicators(prefix=prefix)
     df = ti.add_all(df)
 
-    # Forward-fill supporting market/macro columns before feature engineering.
-    # Some assets update later than the selected target. Without this,
-    # FeatureEngineer.dropna() can remove the latest target rows and make the
-    # forecast start from an older date. Forward-fill is time-series safe
-    # because it only carries past known values forward.
-    df = df.sort_index().ffill()
+    df = df.ffill()
 
     fe = FeatureEngineer(target_col=target_col)
     df = fe.build_features(df)
 
-    # Phase 5: add market-aware feature intelligence.
-    # These features use only current/past information, so they are valid
-    # for the next-day target created in preprocessing.py.
     df = add_phase5_feature_intelligence(df, target_col=target_col)
     return df
-
 
 def get_preprocessor_and_data(df: pd.DataFrame, target_col: str = DEFAULT_TARGET_COLUMN):
     """Not cached — Preprocessor holds unpicklable scaler state we reuse live."""
@@ -3401,11 +3418,33 @@ if page == "Market Research Assistant":
             ):
                 st.write(step)
             try:
-                phase29_report = _store_phase29_run_report(run_full_user_research(
-                    selected_assets=get_supported_assets(), selected_horizons=get_available_horizons(),
-                    amount=10000, cost_assumptions=default_cost_assumptions(),
+                if refresh_market_clicked:
+                    try:
+                        st.cache_data.clear()
+                        st.cache_resource.clear()
+                    except Exception:
+                        pass
+
+                    for stale_key in (
+                        "active_research_snapshot",
+                        "active_prediction_snapshot",
+                        "phase29_user_report",
+                        "phase29_snapshot_source",
+                        "phase29_snapshot_notice",
+                    ):
+                        st.session_state.pop(stale_key, None)
+
+                raw_phase29_report = run_full_user_research(
+                    selected_assets=get_supported_assets(),
+                    selected_horizons=get_available_horizons(),
+                    amount=10000,
+                    cost_assumptions=default_cost_assumptions(),
                     refresh=bool(refresh_market_clicked),
-                ))
+                )
+                phase29_report = _store_phase29_run_report(
+                    raw_phase29_report,
+                    refresh=bool(refresh_market_clicked),
+                )
                 phase29_report["PriceDisplaySource"] = (
                     "Latest refreshed research snapshot" if refresh_market_clicked else "Cached market snapshot"
                 )

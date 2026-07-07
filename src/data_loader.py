@@ -327,8 +327,26 @@ class DataLoader:
         macro_cols = [c for c in df.columns if c in ("CPI", "FedRate")]
         df[macro_cols] = df[macro_cols].ffill()
 
-        # Drop rows where Gold_Close is missing (no trading)
-        if "Gold_Close" in df.columns:
+        # Multi-asset dashboard rule:
+        # Do NOT drop a date just because Gold is missing.
+        # Bitcoin and other assets can have valid observations on dates where
+        # Gold/US exchange-traded assets are unavailable. Dropping only on
+        # Gold_Close makes the whole dashboard look stale.
+        close_cols = [
+            col for col in (
+                "Gold_Close",
+                "Silver_Close",
+                "Oil_Close",
+                "BTC_Close",
+                "SP500_Close",
+                "GLD_Close",
+            )
+            if col in df.columns
+        ]
+
+        if close_cols:
+            df.dropna(subset=close_cols, how="all", inplace=True)
+        elif "Gold_Close" in df.columns:
             df.dropna(subset=["Gold_Close"], inplace=True)
 
         # Remove duplicate indices
